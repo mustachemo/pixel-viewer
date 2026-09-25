@@ -15,6 +15,8 @@ from PySide6.QtGui import (
     QActionGroup,
     QCloseEvent,
     QCursor,
+    QDragEnterEvent,
+    QDropEvent,
     QFontDatabase,
     QKeySequence,
 )
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
         self.canvas = PixelCanvas(self)
         self.canvas.set_gray(gray)
         self.setCentralWidget(self.canvas)
+        self.setAcceptDrops(True)
         self.setUnifiedTitleAndToolBarOnMac(True)
         self.setWindowTitle(APP_NAME)
 
@@ -78,6 +81,7 @@ class MainWindow(QMainWindow):
         self.next_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
         self.first_action = self._action("&First Image", ["Home"], lambda: self._go_to(0))
         self.last_action = self._action("&Last Image", ["End"], lambda: self._go_to(sys.maxsize))
+        self.shortcuts_action = self._action("&Keyboard Shortcuts", ["H", "?"], self.show_shortcuts)
 
         # -------------------------------- Menus ------------------------------- #
         menu_bar = self.menuBar()
@@ -93,6 +97,8 @@ class MainWindow(QMainWindow):
         go_menu.addActions([self.previous_action, self.next_action])
         go_menu.addSeparator()
         go_menu.addActions([self.first_action, self.last_action])
+        help_menu = menu_bar.addMenu("&Help")
+        help_menu.addAction(self.shortcuts_action)
 
         toolbar = self.addToolBar("Main")
         toolbar.setObjectName("main_toolbar")
@@ -233,6 +239,31 @@ class MainWindow(QMainWindow):
             anchor = self.canvas.mapFromGlobal(QCursor.pos()).toPointF()
         self.canvas.zoom_by_steps(steps, anchor)
 
+    def show_shortcuts(self) -> None:
+        """Shows a table of keyboard and mouse controls."""
+        open_keys = self.open_action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        quit_keys = self.quit_action.shortcuts()[0].toString(QKeySequence.SequenceFormat.NativeText)
+        rows = [
+            ("← →", "Previous / next image in the folder"),
+            ("Home End", "First / last image"),
+            ("Drag, W A S D", "Pan"),
+            ("Scroll, pinch, + −", "Zoom at the pointer"),
+            ("G", "Toggle original / grayscale"),
+            ("C", "Find object"),
+            ("R", "Fit to window"),
+            ("H, ?", "Show this help"),
+            (open_keys, "Open an image"),
+            (f"Q, {quit_keys}", "Quit"),
+        ]
+        table_rows = "".join(
+            f"<tr><td style='padding:2px 16px 2px 0'><b>{keys}</b></td><td>{action}</td></tr>" for keys, action in rows
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.setTextFormat(Qt.TextFormat.RichText)
+        dialog.setText(f"<table>{table_rows}</table>")
+        dialog.exec()
+
     # ------------------------------ Status bar ------------------------------- #
     def _show_cursor(self, pixel: tuple[int, int] | None) -> None:
         """Shows the image pixel under the pointer."""
@@ -261,6 +292,18 @@ class MainWindow(QMainWindow):
             action.setEnabled(not image.is_single_channel)
 
     # ----------------------------- Window events ----------------------------- #
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accepts dragged local files and folders."""
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Opens the first dropped file or folder."""
+        local_paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if local_paths:
+            event.acceptProposedAction()
+            self.open_path(local_paths[0])
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Stops background decoding before the window closes."""
         if self._folder is not None:
