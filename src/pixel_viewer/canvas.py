@@ -13,13 +13,16 @@ from PySide6.QtGui import (
     QFont,
     QFontDatabase,
     QImage,
+    QKeyEvent,
     QMouseEvent,
+    QNativeGestureEvent,
     QPainter,
     QPainterPath,
     QPaintEvent,
     QPen,
     QPixmap,
     QResizeEvent,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -32,6 +35,9 @@ GRID_MIN_ZOOM = 8
 HOVER_MIN_ZOOM = 4
 GRAY_TEXT_MIN_ZOOM = 24
 RGB_TEXT_MIN_ZOOM = 32
+PAN_FRACTION = 0.25
+WHEEL_UNITS_PER_STEP = 120
+PINCH_PER_STEP = 0.12
 MIN_FONT_PIXELS = 6
 GLYPH_CACHE_LIMIT = 4096
 
@@ -43,6 +49,13 @@ OUTLINE_COLOR = QColor(0, 0, 0, 220)
 CHANNEL_TEXT_COLORS = (QColor(255, 70, 70), QColor(70, 230, 70), QColor(50, 160, 255))
 DARK_TEXT_COLOR = QColor(0, 0, 0)
 LIGHT_TEXT_COLOR = QColor(255, 255, 255)
+
+WASD_PAN_DIRECTIONS = {
+    int(Qt.Key.Key_W): (0, -1),
+    int(Qt.Key.Key_A): (-1, 0),
+    int(Qt.Key.Key_S): (0, 1),
+    int(Qt.Key.Key_D): (1, 0),
+}
 
 
 # ================================== Canvas =================================== #
@@ -81,6 +94,9 @@ class PixelCanvas(QWidget):
         self._step_zoom = 1.0
         self._center = QPointF()
         self._hover: tuple[int, int] | None = None
+        self._drag_last: QPointF | None = None
+        self._wheel_accumulator = 0.0
+        self._pinch_accumulator = 0.0
         self._glyph_cache: dict[tuple[str, int, bool, int, float], QPixmap] = {}
         self._value_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         self._value_font.setWeight(QFont.Weight.DemiBold)
@@ -408,9 +424,74 @@ class PixelCanvas(QWidget):
         self.cursor_moved.emit(pixel)
 
     # --------------------------------- Input --------------------------------- #
+    def event(self, event: QEvent) -> bool:
+        """Handles the trackpad pinch gesture (macOS and Wayland); other events go to the default handlers."""
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and isinstance(event, QNativeGestureEvent)
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._pinch_accumulator += event.value()
+            if abs(self._pinch_accumulator) >= PINCH_PER_STEP:
+                direction = 1 if self._pinch_accumulator > 0 else -1
+                self._pinch_accumulator = 0.0
+                self.zoom_by_steps(direction, event.position())
+            return True
+        return super().event(event)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Zooms around the pointer, one level per notch or per equivalent trackpad scroll distance."""
+        event.accept()
+        # * Trackpad momentum after the fingers lift would keep zooming long after the user stopped.
+        if event.phase() == Qt.ScrollPhase.ScrollMomentum:
+            return
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        # * Undo macOS "natural scrolling" so wheel-away always zooms in, whatever the system setting.
+        if event.inverted():
+            delta = -delta
+        self._wheel_accumulator += delta
+        if abs(self._wheel_accumulator) < WHEEL_UNITS_PER_STEP:
+            return
+        direction = 1 if self._wheel_accumulator > 0 else -1
+        # Cap at one level per event and drop any backlog, so a fast flick cannot overshoot several levels.
+        self._wheel_accumulator = 0.0
+        self.zoom_by_steps(direction, event.position())
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Starts a drag-to-pan with the left button."""
+        if event.button() == Qt.MouseButton.LeftButton and self._image is not None:
+            self._drag_last = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        """Tracks the pixel under the pointer."""
+        """Pans while dragging and tracks the pixel under the pointer."""
+        if self._drag_last is not None:
+            delta = event.position() - self._drag_last
+            self._drag_last = event.position()
+            self._center -= delta / self.zoom
+            self._after_view_change()
         self._set_hover(self.pixel_at(event.position()))
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """Ends a drag-to-pan."""
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_last is not None:
+            self._drag_last = None
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Pans with W, A, S and D; other keys go to the window's shortcuts."""
+        direction = WASD_PAN_DIRECTIONS.get(event.key())
+        unmodified = event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier)
+        if direction is None or not unmodified:
+            super().keyPressEvent(event)
+            return
+        self.pan_by_fraction(direction[0] * PAN_FRACTION, direction[1] * PAN_FRACTION)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         """Keeps the view inside the image when the window size changes."""

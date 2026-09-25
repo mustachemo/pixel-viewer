@@ -8,7 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 
 # Local
 from pixel_viewer.canvas import PixelCanvas
@@ -45,6 +46,20 @@ def color_image(width: int, height: int) -> np.ndarray:
     pixels[:, :, 0] = np.arange(width, dtype=np.uint32)[None, :] % 256
     pixels[:, :, 2] = np.arange(height, dtype=np.uint32)[:, None] % 256
     return pixels
+
+
+def wheel_event(position: QPointF, delta_y: int) -> QWheelEvent:
+    """A mouse-wheel event at ``position`` with a vertical angle delta."""
+    return QWheelEvent(
+        position,
+        position,
+        QPoint(),
+        QPoint(0, delta_y),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
 
 
 # ================================== View state =============================== #
@@ -116,6 +131,31 @@ def test_single_channel_images_are_always_gray(canvas: PixelCanvas, make_image) 
     canvas.set_gray(False)
 
     assert canvas.is_gray
+
+
+# ==================================== Input ================================== #
+def test_wheel_accumulates_partial_deltas(canvas: PixelCanvas, make_image) -> None:
+    canvas.set_image(make_image(color_image(800, 600)))
+    centre = QPointF(400, 300)
+
+    canvas.wheelEvent(wheel_event(centre, 60))
+    assert canvas.is_fit
+    canvas.wheelEvent(wheel_event(centre, 60))
+    assert canvas.zoom == 2
+    canvas.wheelEvent(wheel_event(centre, -120))
+    assert canvas.is_fit
+
+
+def test_wasd_pans(canvas: PixelCanvas, make_image, qtbot) -> None:
+    canvas.set_image(make_image(color_image(800, 600)))
+    canvas.zoom_by_steps(3)
+    before = canvas.screen_to_image(QPointF(400, 300))
+
+    qtbot.keyClick(canvas, Qt.Key.Key_D)
+
+    after = canvas.screen_to_image(QPointF(400, 300))
+    assert after.x() == pytest.approx(before.x() + 0.25 * 800 / canvas.zoom)
+    assert after.y() == before.y()
 
 
 # =================================== Painting ================================ #
