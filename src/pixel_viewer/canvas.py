@@ -5,15 +5,20 @@
 import math
 
 # Third-party
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, Signal
+import numpy as np
+from PySide6.QtCore import QEvent, QLineF, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QFont,
+    QFontDatabase,
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
+    QPixmap,
     QResizeEvent,
 )
 from PySide6.QtWidgets import QWidget
@@ -23,11 +28,21 @@ from pixel_viewer.images import LoadedImage
 
 # ================================== Constants ================================ #
 ZOOM_STEPS = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+GRID_MIN_ZOOM = 8
 HOVER_MIN_ZOOM = 4
+GRAY_TEXT_MIN_ZOOM = 24
+RGB_TEXT_MIN_ZOOM = 32
+MIN_FONT_PIXELS = 6
+GLYPH_CACHE_LIMIT = 4096
 
 BACKGROUND_COLOR = QColor(30, 30, 30)
+GRID_COLOR = QColor(70, 70, 70)
 HOVER_COLOR = QColor(255, 220, 0)
 PLACEHOLDER_COLOR = QColor(150, 150, 150)
+OUTLINE_COLOR = QColor(0, 0, 0, 220)
+CHANNEL_TEXT_COLORS = (QColor(255, 70, 70), QColor(70, 230, 70), QColor(50, 160, 255))
+DARK_TEXT_COLOR = QColor(0, 0, 0)
+LIGHT_TEXT_COLOR = QColor(255, 255, 255)
 
 
 # ================================== Canvas =================================== #
@@ -66,6 +81,9 @@ class PixelCanvas(QWidget):
         self._step_zoom = 1.0
         self._center = QPointF()
         self._hover: tuple[int, int] | None = None
+        self._glyph_cache: dict[tuple[str, int, bool, int, float], QPixmap] = {}
+        self._value_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        self._value_font.setWeight(QFont.Weight.DemiBold)
 
     # ------------------------------ View state ------------------------------- #
     @property
@@ -240,7 +258,7 @@ class PixelCanvas(QWidget):
 
     # ------------------------------- Painting -------------------------------- #
     def paintEvent(self, event: QPaintEvent) -> None:
-        """Draws the part of the image inside the dirty rect."""
+        """Draws the part of the image, grid and values inside the dirty rect."""
         painter = QPainter(self)
         dirty = event.rect()
         painter.fillRect(dirty, BACKGROUND_COLOR)
@@ -265,12 +283,114 @@ class PixelCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, zoom < 1)
         painter.drawImage(target, qimage, QRectF(x0, y0, x1 - x0, y1 - y0))
 
+        if zoom >= GRID_MIN_ZOOM:
+            grid_pen = QPen(GRID_COLOR)
+            grid_pen.setCosmetic(True)
+            painter.setPen(grid_pen)
+            vertical = [
+                QLineF(target.left() + i * zoom, target.top(), target.left() + i * zoom, target.bottom())
+                for i in range(x1 - x0 + 1)
+            ]
+            horizontal = [
+                QLineF(target.left(), target.top() + j * zoom, target.right(), target.top() + j * zoom)
+                for j in range(y1 - y0 + 1)
+            ]
+            painter.drawLines(vertical + horizontal)
+
+        if zoom >= (GRAY_TEXT_MIN_ZOOM if self.is_gray else RGB_TEXT_MIN_ZOOM):
+            self._draw_values(painter, zoom, origin, (x0, y0, x1, y1))
+
         if self._hover is not None and zoom >= HOVER_MIN_ZOOM:
             hover_pen = QPen(HOVER_COLOR, 2)
             hover_pen.setCosmetic(True)
             painter.setPen(hover_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._cell_rect(*self._hover).adjusted(1, 1, -1, -1))
+
+    def _draw_values(self, painter: QPainter, zoom: float, origin: QPointF, bounds: tuple[int, int, int, int]) -> None:
+        """Draws each visible pixel's value(s) centred in its cell.
+
+        Args:
+            painter: Active painter on this widget.
+            zoom: Screen points per image pixel.
+            origin: Widget position of the image's top-left corner.
+            bounds: Visible pixel range ``(x0, y0, x1, y1)``, end-exclusive.
+        """
+        assert self._image is not None
+        x0, y0, x1, y1 = bounds
+        dpr = self.devicePixelRatioF()
+        if self.is_gray:
+            values = self._image.gray_values[y0:y1, x0:x1]
+            display = self._image.gray_display[y0:y1, x0:x1].astype(np.float32)
+            # Rec. 601 luma of the painted color (BGR order) picks black text on light cells, white on dark.
+            is_light = display @ np.array([0.114, 0.587, 0.299], dtype=np.float32) > 127
+            font_pixels = self._font_pixels(zoom, self._max_digits(), line_count=1)
+            for row in range(y1 - y0):
+                for column in range(x1 - x0):
+                    color = DARK_TEXT_COLOR if is_light[row, column] else LIGHT_TEXT_COLOR
+                    glyph = self._glyph(_format_value(values[row, column]), color, False, font_pixels, dpr)
+                    center = origin + QPointF((x0 + column + 0.5) * zoom, (y0 + row + 0.5) * zoom)
+                    _draw_centered(painter, glyph, center, dpr)
+            return
+
+        values = self._image.values[y0:y1, x0:x1]
+        font_pixels = self._font_pixels(zoom, self._max_digits(), line_count=3)
+        for row in range(y1 - y0):
+            for column in range(x1 - x0):
+                blue, green, red = values[row, column]
+                for line, (value, color) in enumerate(zip((red, green, blue), CHANNEL_TEXT_COLORS, strict=True)):
+                    glyph = self._glyph(_format_value(value), color, True, font_pixels, dpr)
+                    center = origin + QPointF((x0 + column + 0.5) * zoom, (y0 + row + (line + 0.5) / 3) * zoom)
+                    _draw_centered(painter, glyph, center, dpr)
+
+    def _max_digits(self) -> int:
+        """Widest value label the image can produce, so the font size does not change from cell to cell."""
+        assert self._image is not None
+        values = self._image.values
+        if values.dtype.kind == "f":
+            return 5
+        if self._image.is_label_mask:
+            # * Masks have few IDs, so size for at least two digits to make them easy to read.
+            return max(2, len(str(int(values.max()))))
+        return len(str(np.iinfo(values.dtype).max))
+
+    @staticmethod
+    def _font_pixels(zoom: float, digit_count: int, line_count: int) -> int:
+        """Largest font pixel size that fits ``line_count`` lines of ``digit_count`` digits in a cell."""
+        # Monospace digits are about 0.6 em wide; digit-only lines need about 1.05 em including spacing.
+        usable = zoom * 0.9
+        return max(MIN_FONT_PIXELS, int(min(usable / (digit_count * 0.62), usable / (line_count * 1.05))))
+
+    def _glyph(self, text: str, color: QColor, outlined: bool, font_pixels: int, dpr: float) -> QPixmap:
+        """Returns a cached, device-pixel-ratio-aware pixmap of ``text``."""
+        key = (text, color.rgba(), outlined, font_pixels, dpr)
+        if (cached := self._glyph_cache.get(key)) is not None:
+            return cached
+        if len(self._glyph_cache) >= GLYPH_CACHE_LIMIT:
+            self._glyph_cache.clear()
+
+        font = QFont(self._value_font)
+        font.setPixelSize(font_pixels)
+        path = QPainterPath()
+        path.addText(0, 0, font, text)
+        outline_width = max(2.0, font_pixels / 5) if outlined else 0.0
+        bounds = path.boundingRect().adjusted(-outline_width, -outline_width, outline_width, outline_width)
+        pixmap = QPixmap(max(1, math.ceil(bounds.width() * dpr)), max(1, math.ceil(bounds.height() * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        glyph_painter = QPainter(pixmap)
+        glyph_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        glyph_painter.translate(-bounds.topLeft())
+        if outlined:
+            outline_pen = QPen(OUTLINE_COLOR, outline_width)
+            outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            glyph_painter.strokePath(path, outline_pen)
+        glyph_painter.fillPath(path, color)
+        glyph_painter.end()
+
+        self._glyph_cache[key] = pixmap
+        return pixmap
 
     def _cell_rect(self, x: int, y: int) -> QRect:
         """Widget rect covering image pixel ``(x, y)``, padded so outline updates repaint cleanly."""
@@ -302,3 +422,14 @@ class PixelCanvas(QWidget):
         """Clears the hover outline when the pointer leaves the canvas."""
         super().leaveEvent(event)
         self._set_hover(None)
+
+
+# ================================== Drawing ================================== #
+def _format_value(value: np.generic) -> str:
+    """Formats a pixel value compactly: integers as-is, floats to three significant digits."""
+    return f"{value:.3g}" if isinstance(value, np.floating) else str(int(value))
+
+
+def _draw_centered(painter: QPainter, glyph: QPixmap, center: QPointF, dpr: float) -> None:
+    """Draws ``glyph`` centred on ``center``, in logical (device-independent) points."""
+    painter.drawPixmap(QPointF(center.x() - glyph.width() / (2 * dpr), center.y() - glyph.height() / (2 * dpr)), glyph)

@@ -119,5 +119,18 @@ def test_single_channel_images_are_always_gray(canvas: PixelCanvas, make_image) 
 
 
 # =================================== Painting ================================ #
+@pytest.mark.parametrize("gray", [False, True])
+def test_paints_values_when_zoomed(canvas: PixelCanvas, make_image, gray: bool) -> None:
+    canvas.set_image(make_image(color_image(64, 48)))
+    canvas.set_gray(gray)
+    canvas.zoom_by_steps(20)
+
+    frame = canvas.grab().toImage()
+
+    assert canvas.zoom == 128
+    assert not frame.isNull()
+    assert canvas._glyph_cache
+
+
 def test_paints_placeholder_without_image(canvas: PixelCanvas) -> None:
     assert not canvas.grab().isNull()
