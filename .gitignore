@@ -1,0 +1,22 @@
+# Environments and build output
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local planning notes
+plan.md
