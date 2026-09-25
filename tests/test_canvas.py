@@ -133,6 +133,25 @@ def test_single_channel_images_are_always_gray(canvas: PixelCanvas, make_image) 
     assert canvas.is_gray
 
 
+def test_find_object_zooms_to_content(canvas: PixelCanvas, make_image) -> None:
+    pixels = np.zeros((600, 800, 3), dtype=np.uint8)
+    pixels[200:260, 300:400] = 200
+    canvas.set_image(make_image(pixels))
+
+    canvas.find_object()
+
+    assert canvas.zoom == 8
+    assert canvas.screen_to_image(QPointF(400, 300)) == QPointF(350, 230)
+
+
+def test_find_object_on_empty_image_keeps_view(canvas: PixelCanvas, make_image) -> None:
+    canvas.set_image(make_image(np.zeros((60, 80, 3), dtype=np.uint8)))
+
+    canvas.find_object()
+
+    assert canvas.is_fit
+
+
 # ==================================== Input ================================== #
 def test_wheel_accumulates_partial_deltas(canvas: PixelCanvas, make_image) -> None:
     canvas.set_image(make_image(color_image(800, 600)))

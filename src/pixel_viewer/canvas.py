@@ -35,6 +35,7 @@ GRID_MIN_ZOOM = 8
 HOVER_MIN_ZOOM = 4
 GRAY_TEXT_MIN_ZOOM = 24
 RGB_TEXT_MIN_ZOOM = 32
+CONTENT_THRESHOLD = 30
 PAN_FRACTION = 0.25
 WHEEL_UNITS_PER_STEP = 120
 PINCH_PER_STEP = 0.12
@@ -215,6 +216,28 @@ class PixelCanvas(QWidget):
         if self._image is None:
             return
         self._center += QPointF(dx * self.width(), dy * self.height()) / self.zoom
+        self._after_view_change()
+
+    def find_object(self) -> None:
+        """Zooms to the largest level that shows all non-background pixels, centred on them."""
+        if self._image is None:
+            return
+        image = self._image
+        content = image.values > 0 if image.is_label_mask else image.gray_values > CONTENT_THRESHOLD
+        columns, rows = np.flatnonzero(content.any(axis=0)), np.flatnonzero(content.any(axis=1))
+        if columns.size == 0:
+            return
+
+        box_width, box_height = columns[-1] - columns[0] + 1, rows[-1] - rows[0] + 1
+        fit_zoom = self._fit_zoom()
+        fitting = [
+            step
+            for step in ZOOM_STEPS
+            if step > fit_zoom and box_width * step <= self.width() and box_height * step <= self.height()
+        ]
+        self._is_fit = not fitting
+        self._step_zoom = float(fitting[-1]) if fitting else 1.0
+        self._center = QPointF((columns[0] + columns[-1] + 1) / 2, (rows[0] + rows[-1] + 1) / 2)
         self._after_view_change()
 
     # ------------------------------ Coordinates ------------------------------ #
