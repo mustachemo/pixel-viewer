@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Export the open folder, or a frame range, as a looping GIF and/or an MP4 at a chosen frame rate
+  (File → Export Animation, Ctrl+E).
+
 ## [0.1.0] - 2026-09-24
 
 ### Added

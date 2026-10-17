@@ -34,6 +34,8 @@ without losing your place.
 - **Precise navigation.** Zoom always happens around the pointer. Pan by dragging or with W A S D. Press **C** to
   zoom straight to the object, and **R** to fit the whole image.
 - **Handles real data.** 8- and 16-bit PNG, TIFF, JPEG and BMP, with or without alpha.
+- **Animation export.** Turn the open folder, or a range of its frames, into a looping GIF, an MP4, or both, at
+  whatever frame rate you set.
 
 ## Screenshots
 
@@ -132,6 +134,7 @@ You can also drag an image or folder onto the window.
 | **R** | Fit to window |
 | **H** or **?** | Show all shortcuts |
 | **⌘O** / **Ctrl+O** | Open an image (**⇧⌘O** / **Ctrl+Shift+O** opens a folder) |
+| **⌘E** / **Ctrl+E** | Export the open folder as a GIF or video |
 | **Q**, **⌘Q** / **Ctrl+Q** | Quit |
 
 ### What appears as you zoom
@@ -146,6 +149,13 @@ You can also drag an image or folder onto the window.
 The status bar shows the file and its size, the position in the folder (for example `12 / 1020`), the view mode,
 the zoom level and the coordinates of the pixel under the pointer.
 
+### Export a GIF or video
+
+With a folder open, choose **File → Export Animation…** (**⌘E** / **Ctrl+E**). Pick the first and last frame, the
+frame rate, and whether to write a looping GIF, an MP4, or both. Frames are saved in the same order as **←** / **→**.
+Color images stay in color. Label masks use the same colors as the viewer. GIF delays step by 10 ms, so 24 fps is
+stored as 40 ms and plays at 25 fps. Video uses H.264 when this machine can encode it, and MPEG-4 otherwise.
+
 ### Masks
 
 If an image's B, G and R channels are identical (as in many exported masks), it is shown as a single channel.
@@ -159,6 +169,7 @@ color, so part 7 is the same color in every frame, and each cell shows the raw I
 - **`canvas.py`** is a custom Qt widget. It draws only the visible (and changed) region, uses nearest-neighbour
   scaling so pixels stay square, snaps to whole zoom levels so the grid stays crisp, and caches rendered number
   glyphs.
+- **`export.py`** writes that same order to a looping GIF or an MP4, at a frame rate you choose.
 - **`app.py`** holds the window, native menus with shortcuts, dialogs and the command-line entry point.
 
 ## Development

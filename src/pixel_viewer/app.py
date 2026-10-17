@@ -4,12 +4,14 @@
 # Standard Library
 import argparse
 import sys
+import threading
+import traceback
 from collections.abc import Callable, Sequence
 from importlib.metadata import version
 from pathlib import Path
 
 # Third-party
-from PySide6.QtCore import QPointF, Qt, QTimer
+from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -20,10 +22,39 @@ from PySide6.QtGui import (
     QFontDatabase,
     QKeySequence,
 )
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMainWindow, QMessageBox, QStyle
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QSpinBox,
+    QStyle,
+    QVBoxLayout,
+    QWidget,
+)
 
 # Local
 from pixel_viewer.canvas import PixelCanvas
+from pixel_viewer.export import (
+    DEFAULT_FPS,
+    MAX_FPS,
+    MIN_FPS,
+    AnimationExport,
+    ExportCancelled,
+    ExportError,
+    animation_destinations,
+    export_gif,
+    export_video,
+)
 from pixel_viewer.images import IMAGE_SUFFIXES, ImageFolder
 
 # ================================== Constants ================================ #
@@ -31,6 +62,257 @@ APP_NAME = "Pixel Viewer"
 WINDOW_SIZE = (1400, 1000)
 STATUS_MESSAGE_MS = 6000
 IMAGE_FILTER = f"Images ({' '.join(f'*{suffix}' for suffix in sorted(IMAGE_SUFFIXES))})"
+ANIMATION_FILTER = "GIF (*.gif);;MP4 video (*.mp4)"
+
+
+# ============================== Export dialog ================================ #
+class ExportDialog(QDialog):
+    """Asks which frames to write, at what rate, and whether to make a GIF, a video, or both."""
+
+    def __init__(self, paths: Sequence[Path], folder: Path, parent: QWidget | None = None) -> None:
+        """Builds the dialog for the images in ``paths``.
+
+        Args:
+            paths: Frames in playback order.
+            folder: Folder those frames live in. The save path starts here.
+            parent: Owning window.
+        """
+        super().__init__(parent)
+        self._paths = list(paths)
+        self._folder = folder
+        self.setWindowTitle("Export Animation")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+
+        self.summary_label = QLabel()
+        self.from_spin = QSpinBox()
+        self.to_spin = QSpinBox()
+        count = max(len(self._paths), 1)
+        for spin, name in ((self.from_spin, "First frame"), (self.to_spin, "Last frame")):
+            spin.setRange(1, count)
+            spin.setAccessibleName(name)
+        self.from_spin.setValue(1)
+        self.to_spin.setValue(count)
+        self.from_spin.valueChanged.connect(self._sync_range)
+        self.to_spin.valueChanged.connect(self._sync_range)
+
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(MIN_FPS, MAX_FPS)
+        self.fps_spin.setValue(DEFAULT_FPS)
+        self.fps_spin.setSuffix(" fps")
+        self.fps_spin.setAccessibleName("Frames per second")
+
+        self.gif_box = QCheckBox("GIF")
+        self.video_box = QCheckBox("MP4 video")
+        self.gif_box.setChecked(True)
+        self.video_box.setChecked(True)
+        self.gif_box.toggled.connect(self._refresh_preview)
+        self.video_box.toggled.connect(self._refresh_preview)
+
+        self.path_edit = QLineEdit(str(folder / folder.name))
+        self.path_edit.setAccessibleName("Save as")
+        self.path_edit.setMinimumWidth(360)
+        self.path_edit.textChanged.connect(self._refresh_preview)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+
+        self.preview_label = QLabel()
+        self.preview_label.setWordWrap(True)
+
+        range_row = QWidget()
+        range_layout = QHBoxLayout(range_row)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.addWidget(self.from_spin)
+        range_layout.addWidget(QLabel("to"))
+        range_layout.addWidget(self.to_spin)
+        range_layout.addStretch(1)
+
+        format_row = QWidget()
+        format_layout = QHBoxLayout(format_row)
+        format_layout.setContentsMargins(0, 0, 0, 0)
+        format_layout.addWidget(self.gif_box)
+        format_layout.addWidget(self.video_box)
+        format_layout.addStretch(1)
+
+        save_row = QWidget()
+        save_layout = QHBoxLayout(save_row)
+        save_layout.setContentsMargins(0, 0, 0, 0)
+        save_layout.addWidget(self.path_edit, 1)
+        save_layout.addWidget(browse)
+
+        form = QFormLayout()
+        form.addRow("Images", self.summary_label)
+        form.addRow("Frames", range_row)
+        form.addRow("Frames per second", self.fps_spin)
+        form.addRow("Format", format_row)
+        form.addRow("Save as", save_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        export_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        export_button.setText("Export")
+        export_button.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.preview_label)
+        layout.addWidget(buttons)
+        self._refresh_summary()
+        self._refresh_preview()
+
+    def settings(self) -> AnimationExport:
+        """Returns the request described by the form.
+
+        Raises:
+            ExportError: If the form has no format, no file name, or nowhere to save.
+        """
+        text = self.path_edit.text().strip()
+        if not text:
+            raise ExportError("Choose where to save the animation.")
+        gif_path, video_path = animation_destinations(
+            self._base_path(), gif=self.gif_box.isChecked(), video=self.video_box.isChecked()
+        )
+        for path in (gif_path, video_path):
+            if path is not None and not path.parent.is_dir():
+                raise ExportError(f"No such folder: {path.parent}")
+        selected = tuple(self._paths[self.from_spin.value() - 1 : self.to_spin.value()])
+        return AnimationExport(selected, self.fps_spin.value(), gif_path, video_path)
+
+    def accept(self) -> None:
+        """Closes the dialog when the form is valid, and explains it in place when it is not."""
+        try:
+            self.settings()
+        except ExportError as error:
+            self.preview_label.setText(str(error))
+            return
+        super().accept()
+
+    def _base_path(self) -> Path:
+        """Save location. A chosen folder is used as the directory, with the folder's name as the file name."""
+        base = Path(self.path_edit.text().strip()).expanduser()
+        if base.is_dir():
+            return base / base.name
+        return base
+
+    def _sync_range(self) -> None:
+        """Keeps the first frame from landing after the last, then updates the summary."""
+        if self.from_spin.value() > self.to_spin.value():
+            if self.sender() is self.from_spin:
+                self.to_spin.setValue(self.from_spin.value())
+            else:
+                self.from_spin.setValue(self.to_spin.value())
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
+        """Describes the frames the spin boxes currently include."""
+        selected = self._paths[self.from_spin.value() - 1 : self.to_spin.value()]
+        if len(selected) <= 1:
+            self.summary_label.setText(selected[0].name if selected else "No images")
+            return
+        self.summary_label.setText(f"{len(selected)} images, {selected[0].name} through {selected[-1].name}")
+
+    def _refresh_preview(self) -> None:
+        """Shows the file names that Export will write."""
+        if not self.gif_box.isChecked() and not self.video_box.isChecked():
+            self.preview_label.setText("Choose a GIF, a video, or both.")
+            return
+        text = self.path_edit.text().strip()
+        if not text:
+            self.preview_label.setText("Choose where to save the animation.")
+            return
+        try:
+            gif_path, video_path = animation_destinations(
+                self._base_path(), gif=self.gif_box.isChecked(), video=self.video_box.isChecked()
+            )
+        except ExportError as error:
+            self.preview_label.setText(str(error))
+            return
+        names = [path.name for path in (gif_path, video_path) if path is not None]
+        self.preview_label.setText("Saves " + " and ".join(names))
+
+    def _browse(self) -> None:
+        """Asks for a save path without taking over the event loop."""
+        # ! Same constraint as the open dialogs: exec() on a native file panel can stop taking clicks on macOS.
+        current = self._base_path()
+        start = current.parent if current.parent.is_dir() else self._folder
+        video_only = self.video_box.isChecked() and not self.gif_box.isChecked()
+        dialog = QFileDialog(self, "Export Animation", str(start / current.name), ANIMATION_FILTER)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        dialog.setOption(QFileDialog.Option.DontConfirmOverwrite, True)
+        dialog.setDefaultSuffix("mp4" if video_only else "gif")
+        dialog.selectNameFilter("MP4 video (*.mp4)" if video_only else "GIF (*.gif)")
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.fileSelected.connect(self.path_edit.setText)
+        dialog.open()
+
+
+class _AnimationExporter(QObject):
+    """Writes an animation off the UI thread and reports progress back with signals."""
+
+    progressed = Signal(str, int, int)
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, settings: AnimationExport, cancelled: Callable[[], bool]) -> None:
+        super().__init__()
+        self._settings = settings
+        self._cancelled = cancelled
+
+    def run(self) -> None:
+        """Writes each requested file. Runs on the export thread."""
+        jobs: list[tuple[str, Path]] = []
+        if self._settings.gif_path is not None:
+            jobs.append(("GIF", self._settings.gif_path))
+        if self._settings.video_path is not None:
+            jobs.append(("video", self._settings.video_path))
+        frame_count = len(self._settings.paths)
+        total = frame_count * len(jobs)
+        written: list[str] = []
+        notes: list[str] = []
+        try:
+            for job_index, (label, path) in enumerate(jobs):
+
+                def on_frame(index: int, _count: int, job_index: int = job_index, label: str = label) -> None:
+                    self.progressed.emit(f"Writing {label}…", job_index * frame_count + index, total)
+
+                if label == "GIF":
+                    export_gif(
+                        self._settings.paths,
+                        path,
+                        self._settings.fps,
+                        on_frame=on_frame,
+                        cancelled=self._cancelled,
+                    )
+                else:
+                    note = export_video(
+                        self._settings.paths,
+                        path,
+                        self._settings.fps,
+                        on_frame=on_frame,
+                        cancelled=self._cancelled,
+                    )
+                    if note:
+                        notes.append(note)
+                written.append(path.name)
+        except ExportCancelled:
+            message = "Export cancelled."
+            if written:
+                message = f"{message} Saved {' and '.join(written)}."
+            self.succeeded.emit(message)
+            return
+        except ExportError as error:
+            suffix = f" Saved {' and '.join(written)}." if written else ""
+            self.failed.emit(f"{error}{suffix}")
+            return
+        except Exception as error:  # noqa: BLE001 - keep the window alive and show whatever the encoder raised.
+            traceback.print_exc()
+            self.failed.emit(str(error) or "Could not export the animation.")
+            return
+        message = f"Saved {' and '.join(written)}"
+        if notes:
+            message = f"{message}. {' '.join(notes)}"
+        self.succeeded.emit(message)
 
 
 # ================================ Main Window ================================ #
@@ -45,6 +327,12 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         self._folder: ImageFolder | None = None
+        self._export_thread: QThread | None = None
+        self._export_worker: _AnimationExporter | None = None
+        self._export_progress: QProgressDialog | None = None
+        self._export_cancel: threading.Event | None = None
+        self._exporting = False
+        self._closing_progress = False
         self.canvas = PixelCanvas(self)
         self.canvas.set_gray(gray)
         self.setCentralWidget(self.canvas)
@@ -57,6 +345,9 @@ class MainWindow(QMainWindow):
         self.open_action = self._action("&Open…", [QKeySequence.StandardKey.Open], self.open_file_dialog)
         self.open_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
         self.open_folder_action = self._action("Open &Folder…", ["Ctrl+Shift+O"], self.open_folder_dialog)
+        self.export_action = self._action("Export &Animation…", ["Ctrl+E"], self.export_animation)
+        self.export_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        self.export_action.setEnabled(False)
         self.quit_action = self._action("&Quit", [QKeySequence.StandardKey.Quit, "Q"], self.close)
 
         self.original_action = self._action("&Original", [], lambda: self.canvas.set_gray(False), checkable=True)
@@ -88,6 +379,8 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("&File")
         file_menu.addActions([self.open_action, self.open_folder_action])
         file_menu.addSeparator()
+        file_menu.addAction(self.export_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
         view_menu = menu_bar.addMenu("&View")
         view_menu.addActions([self.original_action, self.gray_action, self.toggle_gray_action])
@@ -111,6 +404,8 @@ class MainWindow(QMainWindow):
         toolbar.addActions([self.original_action, self.gray_action])
         toolbar.addSeparator()
         toolbar.addActions([self.zoom_out_action, self.zoom_in_action, self.fit_action, self.find_action])
+        toolbar.addSeparator()
+        toolbar.addAction(self.export_action)
 
         # ------------------------------ Status bar ---------------------------- #
         self.file_label = QLabel()
@@ -225,6 +520,7 @@ class MainWindow(QMainWindow):
             (self.last_action, index < count - 1),
         ):
             action.setEnabled(enabled)
+        self.export_action.setEnabled(not self._exporting)
         self._update_status()
 
     # ------------------------------- View ------------------------------------ #
@@ -242,6 +538,7 @@ class MainWindow(QMainWindow):
     def show_shortcuts(self) -> None:
         """Shows a table of keyboard and mouse controls."""
         open_keys = self.open_action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+        export_keys = self.export_action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
         quit_keys = self.quit_action.shortcuts()[0].toString(QKeySequence.SequenceFormat.NativeText)
         rows = [
             ("← →", "Previous / next image in the folder"),
@@ -253,6 +550,7 @@ class MainWindow(QMainWindow):
             ("R", "Fit to window"),
             ("H, ?", "Show this help"),
             (open_keys, "Open an image"),
+            (export_keys, "Export a GIF or video"),
             (f"Q, {quit_keys}", "Quit"),
         ]
         table_rows = "".join(
@@ -291,6 +589,122 @@ class MainWindow(QMainWindow):
         for action in (self.original_action, self.gray_action, self.toggle_gray_action):
             action.setEnabled(not image.is_single_channel)
 
+    # -------------------------------- Export --------------------------------- #
+    def export_animation(self) -> None:
+        """Asks how to turn the open folder into a GIF and/or a video, then writes it."""
+        if self._folder is None or self._exporting:
+            return
+        dialog = ExportDialog(self._folder.paths, self._folder.folder, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            settings = dialog.settings()
+        except ExportError as error:
+            QMessageBox.warning(self, "Cannot Export", str(error))
+            return
+        existing = [
+            path.name for path in (settings.gif_path, settings.video_path) if path is not None and path.exists()
+        ]
+        if existing:
+            names = " and ".join(existing)
+            answer = QMessageBox.question(
+                self,
+                "Replace Existing File",
+                f"{names} already exists. Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._start_export(settings)
+
+    def _start_export(self, settings: AnimationExport) -> None:
+        """Writes ``settings`` on a background thread and shows progress on this window."""
+        self._exporting = True
+        self.export_action.setEnabled(False)
+        cancel = threading.Event()
+        self._export_cancel = cancel
+        # * Move the worker onto the thread before connecting it, so run() executes there rather than on the UI thread.
+        worker = _AnimationExporter(settings, cancel.is_set)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progressed.connect(self._on_export_progress)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.succeeded.connect(self._show_export_message)
+        worker.failed.connect(self._show_export_error)
+        thread.finished.connect(self._clear_export_job)
+        self._export_worker = worker
+        self._export_thread = thread
+
+        progress = QProgressDialog("Preparing…", "Cancel", 0, len(settings.paths), self)
+        progress.setWindowTitle("Export Animation")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.canceled.connect(self._cancel_export)
+        self._export_progress = progress
+        progress.show()
+        thread.start()
+
+    def _on_export_progress(self, label: str, current: int, total: int) -> None:
+        """Advances the progress dialog. Late updates after Cancel are ignored."""
+        if self._export_cancel is not None and self._export_cancel.is_set():
+            return
+        progress = self._export_progress
+        if progress is None:
+            return
+        progress.setMaximum(total)
+        progress.setLabelText(label)
+        progress.setValue(min(current, total))
+
+    def _cancel_export(self) -> None:
+        """Asks the writer to stop after the frame it is on."""
+        if self._closing_progress or self._export_cancel is None:
+            return
+        self._export_cancel.set()
+        if self._export_progress is not None:
+            self._export_progress.setLabelText("Cancelling…")
+
+    def _show_export_message(self, message: str) -> None:
+        """Closes the progress dialog and reports a finished or cancelled export."""
+        self._close_progress()
+        self.statusBar().showMessage(message, STATUS_MESSAGE_MS)
+
+    def _show_export_error(self, message: str) -> None:
+        """Closes the progress dialog and explains why the export stopped."""
+        self._close_progress()
+        QMessageBox.warning(self, "Cannot Export", message)
+
+    def _close_progress(self) -> None:
+        """Closes the progress dialog without treating that close as a cancel request."""
+        progress = self._export_progress
+        if progress is None:
+            return
+        self._closing_progress = True
+        self._export_progress = None
+        progress.close()
+        self._closing_progress = False
+
+    def _clear_export_job(self) -> None:
+        """Drops the finished export thread and turns the menu item back on."""
+        self._exporting = False
+        thread = self._export_thread
+        worker = self._export_worker
+        self._export_thread = None
+        self._export_worker = None
+        self._export_cancel = None
+        self._close_progress()
+        if thread is not None:
+            thread.deleteLater()
+        if worker is not None:
+            worker.deleteLater()
+        if self._folder is not None:
+            self.export_action.setEnabled(True)
+
     # ----------------------------- Window events ----------------------------- #
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accepts dragged local files and folders."""
@@ -305,7 +719,13 @@ class MainWindow(QMainWindow):
             self.open_path(local_paths[0])
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Stops background decoding before the window closes."""
+        """Stops background decoding and any export before the window closes."""
+        if self._export_cancel is not None:
+            self._export_cancel.set()
+        thread = self._export_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
         if self._folder is not None:
             self._folder.close()
         super().closeEvent(event)
