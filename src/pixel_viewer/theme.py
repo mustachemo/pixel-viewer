@@ -136,6 +136,13 @@ QStatusBar QLabel {
     color: #c5cedd;
     padding: 0 8px;
 }
+QWidget#clip_bar {
+    background: #181b24;
+    border-top: 1px solid #2a3142;
+}
+QWidget#clip_bar QLabel {
+    color: #c5cedd;
+}
 QPushButton {
     background: #2a3142;
     color: #f2f4f8;

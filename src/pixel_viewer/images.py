@@ -15,6 +15,8 @@ import numpy as np
 
 # ================================== Constants ================================ #
 IMAGE_SUFFIXES = frozenset({".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"})
+MOTION_SUFFIXES = frozenset({".avi", ".gif", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
+VIEWABLE_SUFFIXES = IMAGE_SUFFIXES | MOTION_SUFFIXES
 MAX_LABEL_COUNT = 64
 LABEL_COLOR_STEP = 12
 PREFETCH_RADIUS = 2
@@ -65,6 +67,54 @@ def _to_uint8(array: np.ndarray) -> np.ndarray:
     return cv2.normalize(array, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
 
 
+def is_motion(path: Path) -> bool:
+    """True for a GIF or video, which the viewer plays instead of decoding as one still image."""
+    return path.suffix.lower() in MOTION_SUFFIXES
+
+
+def loaded_from_array(path: Path, raw: np.ndarray, *, detect_mask: bool = True) -> LoadedImage:
+    """Builds the viewer buffers for an array already in OpenCV's layout.
+
+    Args:
+        path: File the pixels came from. Stored on the result; not read again.
+        raw: H×W or H×W×C array. Color is BGR. Alpha and replicated channels are collapsed.
+        detect_mask: Look for a label mask. Video playback turns this off so each frame is not scanned twice.
+
+    Returns:
+        The buffers the canvas paints and labels.
+    """
+    if raw.ndim == 3:
+        bgr = raw[:, :, :3]
+        if detect_mask:
+            is_replicated = (bgr[:, :, 0] == bgr[:, :, 1]).all() and (bgr[:, :, 1] == bgr[:, :, 2]).all()
+            raw = np.ascontiguousarray(bgr[:, :, 0] if is_replicated else bgr)
+        else:
+            raw = np.ascontiguousarray(bgr)
+
+    is_single_channel = raw.ndim == 2
+    # * np.bincount is much faster than np.unique on multi-megapixel masks, which matters when browsing quickly.
+    is_label_mask = (
+        detect_mask
+        and is_single_channel
+        and raw.dtype.kind == "u"
+        and np.count_nonzero(np.bincount(raw.ravel())) <= MAX_LABEL_COUNT
+    )
+    gray_values = raw if is_single_channel else cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+    if is_label_mask:
+        gray_display = _LABEL_PALETTE[(raw.astype(np.uint32) * LABEL_COLOR_STEP) % 256]
+    else:
+        gray_display = cv2.cvtColor(_to_uint8(gray_values), cv2.COLOR_GRAY2BGR)
+
+    return LoadedImage(
+        path=path,
+        values=raw,
+        gray_values=gray_values,
+        color_display=None if is_single_channel else _to_uint8(raw),
+        gray_display=gray_display,
+        is_label_mask=is_label_mask,
+    )
+
+
 def load_image(path: Path) -> LoadedImage:
     """Decodes an image file into the buffers the viewer needs.
 
@@ -83,30 +133,7 @@ def load_image(path: Path) -> LoadedImage:
     raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise ValueError(f"Could not decode image: {path}")
-    if raw.ndim == 3:
-        bgr = raw[:, :, :3]
-        is_replicated = (bgr[:, :, 0] == bgr[:, :, 1]).all() and (bgr[:, :, 1] == bgr[:, :, 2]).all()
-        raw = np.ascontiguousarray(bgr[:, :, 0] if is_replicated else bgr)
-
-    is_single_channel = raw.ndim == 2
-    # * np.bincount is much faster than np.unique on multi-megapixel masks, which matters when browsing quickly.
-    is_label_mask = (
-        is_single_channel and raw.dtype.kind == "u" and np.count_nonzero(np.bincount(raw.ravel())) <= MAX_LABEL_COUNT
-    )
-    gray_values = raw if is_single_channel else cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
-    if is_label_mask:
-        gray_display = _LABEL_PALETTE[(raw.astype(np.uint32) * LABEL_COLOR_STEP) % 256]
-    else:
-        gray_display = cv2.cvtColor(_to_uint8(gray_values), cv2.COLOR_GRAY2BGR)
-
-    return LoadedImage(
-        path=path,
-        values=raw,
-        gray_values=gray_values,
-        color_display=None if is_single_channel else _to_uint8(raw),
-        gray_display=gray_display,
-        is_label_mask=is_label_mask,
-    )
+    return loaded_from_array(path, raw)
 
 
 def natural_sort_key(path: Path) -> list[int | str]:
@@ -126,27 +153,27 @@ class ImageFolder:
             loader: Decodes one file; injectable for tests.
 
         Raises:
-            FileNotFoundError: If ``start`` does not exist or its folder has no supported images.
+            FileNotFoundError: If ``start`` does not exist or its folder has no supported images or videos.
             ValueError: If ``start`` is a file with an unsupported extension.
         """
         start = start.expanduser().resolve()
         if not start.exists():
             raise FileNotFoundError(f"No such file or folder: {start}")
-        if start.is_file() and start.suffix.lower() not in IMAGE_SUFFIXES:
-            supported = ", ".join(sorted(IMAGE_SUFFIXES))
-            raise ValueError(f"Unsupported image type '{start.suffix}'. Supported: {supported}")
+        if start.is_file() and start.suffix.lower() not in VIEWABLE_SUFFIXES:
+            supported = ", ".join(sorted(VIEWABLE_SUFFIXES))
+            raise ValueError(f"Unsupported file type '{start.suffix}'. Supported: {supported}")
 
         self.folder = start if start.is_dir() else start.parent
         self.paths = sorted(
             (
                 path
                 for path in self.folder.iterdir()
-                if path.is_file() and not path.name.startswith(".") and path.suffix.lower() in IMAGE_SUFFIXES
+                if path.is_file() and not path.name.startswith(".") and path.suffix.lower() in VIEWABLE_SUFFIXES
             ),
             key=natural_sort_key,
         )
         if not self.paths:
-            raise FileNotFoundError(f"No supported images in {self.folder}")
+            raise FileNotFoundError(f"No supported images or videos in {self.folder}")
         self.index = self.paths.index(start) if start.is_file() else 0
 
         self._loader = loader
@@ -157,6 +184,10 @@ class ImageFolder:
     def current_path(self) -> Path:
         """Path of the selected image."""
         return self.paths[self.index]
+
+    def still_paths(self) -> tuple[Path, ...]:
+        """Still images in folder order. GIFs and videos are left out of an animation export."""
+        return tuple(path for path in self.paths if path.suffix.lower() in IMAGE_SUFFIXES)
 
     def move_to(self, index: int) -> bool:
         """Selects the image at ``index``, clamped to the folder.
@@ -190,7 +221,7 @@ class ImageFolder:
 
         for distance in range(1, PREFETCH_RADIUS + 1):
             for neighbour in (self.index + distance, self.index - distance):
-                if 0 <= neighbour < len(self.paths):
+                if 0 <= neighbour < len(self.paths) and not is_motion(self.paths[neighbour]):
                     self._request(self.paths[neighbour])
         # * Mark the current image most recently used so eviction never drops what is on screen.
         self._cache.move_to_end(path)

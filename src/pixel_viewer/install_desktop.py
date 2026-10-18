@@ -33,7 +33,15 @@ _ICONSET = (
     ("icon_512x512.png", 512),
     ("icon_512x512@2x.png", 1024),
 )
-_IMAGE_TYPES = ("public.png", "public.jpeg", "public.tiff", "com.microsoft.bmp")
+_IMAGE_TYPES = (
+    "public.png",
+    "public.jpeg",
+    "public.tiff",
+    "com.microsoft.bmp",
+    "com.compuserve.gif",
+    "public.mpeg-4",
+    "public.movie",
+)
 
 
 # ================================== Installing =============================== #
@@ -207,7 +215,7 @@ Exec={executable} %F
 Icon=pixel-viewer
 Terminal=false
 Categories=Graphics;2DGraphics;Viewer;
-MimeType=image/png;image/jpeg;image/tiff;image/bmp;
+MimeType=image/png;image/jpeg;image/tiff;image/bmp;image/gif;video/mp4;video/quicktime;video/webm;video/x-msvideo;
 Keywords=pixel;image;mask;zoom;
 StartupNotify=true
 StartupWMClass=pixel-viewer

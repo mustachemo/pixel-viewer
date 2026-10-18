@@ -24,9 +24,9 @@ without losing your place.
 
 - **Per-pixel values.** A pixel grid appears at 8×. Values appear at 24× in grayscale, and at 32× as R, G and B
   in red, green and blue.
-- **Folder browsing.** **←** / **→** step through every image in the folder in natural order (`img_2` before
-  `img_10`). Zoom and position stay put, so you can compare the same spot across frames. Nearby images are decoded
-  in the background, so switching is instant.
+- **Folder browsing.** **←** / **→** step through every file in the folder in natural order (`img_2` before
+  `img_10`), stills, GIFs and videos together. Zoom and position stay put, so you can compare the same spot
+  across frames. Nearby stills are decoded in the background, so switching is instant.
 - **Made for masks.** Images whose channels are identical collapse to one value per pixel. Label masks (up to 64
   distinct IDs) get a fixed color per ID that stays the same in every frame.
 - **Native and fast.** Qt with native menus, trackpad scrolling, pinch-to-zoom and Retina/HiDPI rendering. Only the
@@ -36,6 +36,9 @@ without losing your place.
 - **Handles real data.** 8- and 16-bit PNG, TIFF, JPEG and BMP, with or without alpha.
 - **Animation export.** Turn the open folder, or a range of its frames, into a looping GIF, an MP4, or both, at
   whatever frame rate you set.
+- **GIFs and video.** A GIF or video in the folder is one item, beside the still images. It plays when you land on
+  it. The first frame of a GIF is shown immediately while the rest decode in the background. Pause it to zoom in
+  and read pixel values on that frame. A timeline under the image shows the length, the current time and the frame.
 
 ## Screenshots
 
@@ -151,10 +154,11 @@ You can also drag an image or folder onto the window.
 | Keys | Action |
 | --- | --- |
 | **←** / **→** | Previous / next image in the folder |
-| **Space** | Play or pause through the folder. The toolbar slider sets the time between images, from 0.1 s to 5 s |
+| **Space** | Pause or play the open GIF or video. On a still image, play through the folder. The toolbar slider sets the time between images, from 0.1 s to 5 s |
 | **Home** / **End** | First / last image |
 | Drag, **W A S D** | Pan |
 | Scroll, pinch, **+** / **−** | Zoom around the pointer |
+| Scroll or drag the dial on the right | Move through the folder. One wheel notch is one image; a drag across a long folder can reach any frame |
 | **G** | Toggle original / grayscale |
 | **C** | Find object: zoom to the non-background pixels |
 | **R** | Fit to window |
@@ -196,6 +200,8 @@ color, so part 7 is the same color in every frame, and each cell shows the raw I
   scaling so pixels stay square, snaps to whole zoom levels so the grid stays crisp, and caches rendered number
   glyphs.
 - **`export.py`** writes that same order to a looping GIF or an MP4, at a frame rate you choose.
+- **`dial.py`** is the thumbwheel that scrubs through the open folder.
+- **`media.py`** plays one GIF or video, one frame at a time, as a normal image.
 - **`app.py`** holds the window, native menus with shortcuts, dialogs and the command-line entry point.
 - **`install_desktop.py`** writes the macOS `.app` and the Linux `.desktop` entry for `pixel-viewer --install`.
 

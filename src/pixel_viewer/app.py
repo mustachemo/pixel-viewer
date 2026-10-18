@@ -48,6 +48,8 @@ from PySide6.QtWidgets import (
 
 # Local
 from pixel_viewer.canvas import PixelCanvas
+from pixel_viewer.clip_bar import ClipBar
+from pixel_viewer.dial import FrameDial
 from pixel_viewer.export import (
     DEFAULT_FPS,
     MAX_FPS,
@@ -59,8 +61,9 @@ from pixel_viewer.export import (
     export_gif,
     export_video,
 )
-from pixel_viewer.images import IMAGE_SUFFIXES, ImageFolder
+from pixel_viewer.images import VIEWABLE_SUFFIXES, ImageFolder, is_motion
 from pixel_viewer.install_desktop import install_launcher
+from pixel_viewer.media import MotionClip
 from pixel_viewer.theme import apply_theme, window_icon
 
 # ================================== Constants ================================ #
@@ -71,7 +74,7 @@ PLAYBACK_MIN_MS = 100
 PLAYBACK_MAX_MS = 5000
 PLAYBACK_DEFAULT_MS = 1000
 PLAYBACK_STEP_MS = 100
-IMAGE_FILTER = f"Images ({' '.join(f'*{suffix}' for suffix in sorted(IMAGE_SUFFIXES))})"
+IMAGE_FILTER = f"Images and video ({' '.join(f'*{suffix}' for suffix in sorted(VIEWABLE_SUFFIXES))})"
 ANIMATION_FILTER = "GIF (*.gif);;MP4 video (*.mp4)"
 
 
@@ -370,7 +373,7 @@ class EmptyState(QWidget):
         title.setObjectName("empty_title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel("Drop an image or a folder to inspect every pixel.")
+        subtitle = QLabel("Drop an image, a GIF, a video, or a folder to inspect every pixel.")
         subtitle.setObjectName("empty_subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
@@ -480,7 +483,24 @@ class MainWindow(QMainWindow):
         self.canvas = PixelCanvas(self)
         self.canvas.set_gray(gray)
         self.empty_state = EmptyState(self.canvas, self.open_file_dialog, self.open_folder_dialog, self.open_path)
-        self.setCentralWidget(self.canvas)
+        self.dial = FrameDial()
+        self.dial.hide()
+        self.dial.index_selected.connect(self._scrub_to)
+        self.clip_bar = ClipBar()
+        self.clip_bar.pause_toggled.connect(self._on_space)
+        self.clip_bar.seeked.connect(self._seek_clip)
+        stage = QWidget()
+        stage_layout = QVBoxLayout(stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(0)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.canvas, 1)
+        row.addWidget(self.dial)
+        stage_layout.addLayout(row, 1)
+        stage_layout.addWidget(self.clip_bar)
+        self.setCentralWidget(stage)
         self.setAcceptDrops(True)
         self.setUnifiedTitleAndToolBarOnMac(True)
         self.setWindowTitle(APP_NAME)
@@ -515,10 +535,18 @@ class MainWindow(QMainWindow):
         self.previous_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         self.next_action = self._action("&Next Image", ["Right"], lambda: self._go_by(1))
         self.next_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
-        self.play_action = self._action("&Play", ["Space"], self._toggle_play, checkable=True)
+        self.play_action = self._action("&Play", [], self._toggle_play, checkable=True)
         self.play_action.setEnabled(False)
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._play_next)
+        self._clip: MotionClip | None = None
+        self._clip_seek_target: int | None = None
+        self._clip_timer = QTimer(self)
+        self._clip_timer.timeout.connect(self._advance_clip)
+        self._clip_ready_timer = QTimer(self)
+        self._clip_ready_timer.setInterval(20)
+        self._clip_ready_timer.timeout.connect(self._on_clip_ready)
+        self.space_action = self._action("Pause or Play", ["Space"], self._on_space)
         self.first_action = self._action("&First Image", ["Home"], lambda: self._go_to(0))
         self.last_action = self._action("&Last Image", ["End"], lambda: self._go_to(sys.maxsize))
         self.shortcuts_action = self._action("&Keyboard Shortcuts", ["H", "?"], self.show_shortcuts)
@@ -630,7 +658,7 @@ class MainWindow(QMainWindow):
 
     def open_file_dialog(self) -> None:
         """Asks for an image file to open."""
-        dialog = QFileDialog(self, "Open Image", str(self._dialog_folder()), IMAGE_FILTER)
+        dialog = QFileDialog(self, "Open", str(self._dialog_folder()), IMAGE_FILTER)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         self._show_open_dialog(dialog)
 
@@ -658,6 +686,12 @@ class MainWindow(QMainWindow):
         """Shows the image at ``index`` (clamped), keeping the current zoom and position."""
         if self._folder is not None and self._folder.move_to(index):
             self._show_current(keep_view=True)
+
+    def _scrub_to(self, index: int) -> None:
+        """Moves to ``index`` from the dial and stops playback so the wheel is not fighting the timer."""
+        if self.play_action.isChecked():
+            self.play_action.setChecked(False)
+        self._go_to(index)
 
     def _go_by(self, offset: int) -> None:
         """Steps ``offset`` images forward or back."""
@@ -701,6 +735,110 @@ class MainWindow(QMainWindow):
         else:
             self.play_timer.stop()
 
+    def _on_space(self, _checked: bool = False) -> None:
+        """Pauses the open GIF or video. With a still image showing, Space runs the folder slideshow."""
+        if self._clip is not None and self._clip.frame_count > 1:
+            playing = not self._clip_timer.isActive()
+            if not playing and self.play_action.isChecked():
+                self.play_action.trigger()
+            self._set_clip_playing(playing)
+            return
+        self.play_action.trigger()
+
+    def _set_clip_playing(self, playing: bool) -> None:
+        """Starts or stops the open clip. A paused frame stays on the canvas, so zoom and pixel values still work."""
+        if self._clip is None or self._clip.frame_count < 2:
+            playing = False
+        if playing:
+            self._clip_timer.start(self._clip.delay_ms if self._clip is not None else 0)
+        else:
+            self._clip_timer.stop()
+        self.clip_bar.set_playing(playing)
+
+    def _advance_clip(self) -> None:
+        """Shows the next frame of the open clip, keeping the current zoom and position.
+
+        If that frame is still being decoded, tries again shortly instead of freezing the window.
+        """
+        if self._clip is None:
+            self._clip_timer.stop()
+            return
+        if self._clip.error is not None:
+            self._set_clip_playing(False)
+            self.statusBar().showMessage(self._clip.error, STATUS_MESSAGE_MS)
+            return
+        next_index = (self._clip.index + 1) % self._clip.frame_count
+        if not self._clip.has_frame(next_index):
+            self._clip_timer.start(20)
+            return
+        try:
+            frame = self._clip.step()
+        except ValueError as error:
+            self._set_clip_playing(False)
+            self.statusBar().showMessage(str(error), STATUS_MESSAGE_MS)
+            return
+        self.canvas.set_image(frame, keep_view=True)
+        self.clip_bar.show_position(self._clip)
+        self._clip_timer.setInterval(self._clip.delay_ms)
+
+    def _seek_clip(self, index: int) -> None:
+        """Pauses on the frame the timeline landed on. A frame still decoding shows up as soon as it is ready."""
+        if self._clip is None:
+            return
+        index = min(max(index, 0), self._clip.frame_count - 1)
+        if index == self._clip.index:
+            self._clip_seek_target = None
+            return
+        self._set_clip_playing(False)
+        if not self._clip.has_frame(index):
+            self._clip_seek_target = index
+            self._clip_ready_timer.start()
+            return
+        self._clip_seek_target = None
+        self._show_sought_frame(index)
+
+    def _on_clip_ready(self) -> None:
+        """Shows a scrubbed frame once it has been composited, and refreshes the length when decoding finishes."""
+        clip = self._clip
+        if clip is None:
+            self._clip_ready_timer.stop()
+            return
+        if clip.error is not None and (self._clip_seek_target is None or not clip.has_frame(self._clip_seek_target)):
+            self._clip_ready_timer.stop()
+            self._set_clip_playing(False)
+            self.statusBar().showMessage(clip.error, STATUS_MESSAGE_MS)
+            return
+        target = self._clip_seek_target
+        if target is not None and clip.has_frame(target):
+            self._clip_seek_target = None
+            self._show_sought_frame(target)
+        if clip.fully_decoded and self._clip_seek_target is None:
+            self.clip_bar.show_position(clip)
+            self._clip_ready_timer.stop()
+
+    def _show_sought_frame(self, index: int) -> None:
+        """Shows frame ``index`` of the open clip, which is already composited."""
+        if self._clip is None:
+            return
+        try:
+            frame = self._clip.seek(index)
+        except ValueError as error:
+            self.statusBar().showMessage(str(error), STATUS_MESSAGE_MS)
+            return
+        self.canvas.set_image(frame, keep_view=True)
+        self.clip_bar.show_position(self._clip)
+
+    def _close_clip(self) -> None:
+        """Stops playback and releases the decoder."""
+        self._clip_timer.stop()
+        self._clip_ready_timer.stop()
+        self._clip_seek_target = None
+        self.clip_bar.set_playing(False)
+        self.clip_bar.set_clip(None)
+        if self._clip is not None:
+            self._clip.close()
+            self._clip = None
+
     def _play_next(self) -> None:
         """Shows the next image, returning to the first after the last."""
         if self._folder is None or len(self._folder.paths) < 2:
@@ -729,8 +867,18 @@ class MainWindow(QMainWindow):
         """Loads the folder's selected image into the canvas and refreshes the window chrome."""
         assert self._folder is not None
         path = self._folder.current_path
+        self._close_clip()
         try:
-            self.canvas.set_image(self._folder.current(), keep_view=keep_view)
+            if is_motion(path):
+                clip = MotionClip(path)
+                self.canvas.set_image(clip.frame(), keep_view=keep_view)
+                self._clip = clip
+                self.clip_bar.set_clip(clip)
+                self._set_clip_playing(clip.frame_count > 1)
+                if not clip.fully_decoded:
+                    self._clip_ready_timer.start()
+            else:
+                self.canvas.set_image(self._folder.current(), keep_view=keep_view)
         except ValueError as error:
             self.statusBar().showMessage(str(error), STATUS_MESSAGE_MS)
         else:
@@ -747,10 +895,12 @@ class MainWindow(QMainWindow):
             (self.last_action, index < count - 1),
         ):
             action.setEnabled(enabled)
-        self.export_action.setEnabled(not self._exporting)
+        self.export_action.setEnabled(bool(self._folder.still_paths()) and not self._exporting)
         self.play_action.setEnabled(count >= 2)
         if count < 2 and self.play_action.isChecked():
             self.play_action.setChecked(False)
+        self.dial.set_position(index, count)
+        self.dial.setVisible(count > 0)
         self.empty_state.setVisible(self.canvas.image is None)
         self._update_status()
 
@@ -773,10 +923,11 @@ class MainWindow(QMainWindow):
         quit_keys = self.quit_action.shortcuts()[0].toString(QKeySequence.SequenceFormat.NativeText)
         rows = [
             ("← →", "Previous / next image in the folder"),
-            ("Space", "Play or pause through the folder"),
+            ("Space", "Pause a GIF or video, or play through the folder"),
             ("Home End", "First / last image"),
             ("Drag, W A S D", "Pan"),
             ("Scroll, pinch, + −", "Zoom at the pointer"),
+            ("Scroll or drag the dial", "Move through the folder"),
             ("G", "Toggle original / grayscale"),
             ("C", "Find object"),
             ("R", "Fit to window"),
@@ -815,6 +966,9 @@ class MainWindow(QMainWindow):
             mode = "Label mask"
         else:
             mode = "Grayscale" if self.canvas.is_gray else "Original"
+        if self._clip is not None:
+            kind = "GIF" if self._clip.path.suffix.lower() == ".gif" else "Video"
+            mode = f"{kind} · {mode}"
         self.mode_label.setText(mode)
         zoom = self.canvas.zoom
         self.zoom_label.setText(f"Fit {zoom:.0%}" if self.canvas.is_fit else f"{zoom:g}×")
@@ -826,7 +980,10 @@ class MainWindow(QMainWindow):
         """Asks how to turn the open folder into a GIF and/or a video, then writes it."""
         if self._folder is None or self._exporting:
             return
-        dialog = ExportDialog(self._folder.paths, self._folder.folder, self)
+        stills = self._folder.still_paths()
+        if not stills:
+            return
+        dialog = ExportDialog(stills, self._folder.folder, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -973,6 +1130,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Stops background decoding and any export before the window closes."""
         self.play_timer.stop()
+        self._close_clip()
         self._save_geometry()
         if self._export_cancel is not None:
             self._export_cancel.set()

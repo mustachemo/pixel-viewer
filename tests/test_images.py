@@ -188,9 +188,9 @@ def test_folder_errors(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="No such file"):
         ImageFolder(tmp_path / "missing.png")
-    with pytest.raises(FileNotFoundError, match="No supported images"):
+    with pytest.raises(FileNotFoundError, match="No supported images or videos"):
         ImageFolder(tmp_path)
-    with pytest.raises(ValueError, match="Unsupported image type"):
+    with pytest.raises(ValueError, match="Unsupported file type"):
         ImageFolder(tmp_path / "notes.txt")
 
 

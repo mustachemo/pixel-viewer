@@ -16,6 +16,10 @@ All notable changes to this project are documented here. The format follows
   `PixelViewer-macOS.zip`. Build it locally with `python packaging/build_macos_app.py`.
 - Play through the open folder with Space, or the Play button. A slider sets the delay between images
   from 0.1 s to 5 s. Playback loops back to the first image.
+- A thumbwheel on the right of the window. Scroll it one image at a time, or drag it to jump through the folder.
+- GIFs and videos sit in the folder with still images. Landing on one plays it; pausing keeps zoom and pixel
+  values on the current frame. A timeline shows the length, the current time and the frame number. A GIF shows
+  its first frame immediately and decodes the rest in the background.
 
 ### Changed
 

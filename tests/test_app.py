@@ -8,8 +8,9 @@ import cv2
 import numpy as np
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox, QPushButton, QToolBar
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QMessageBox, QPushButton, QToolBar
 
 # Local
 from pixel_viewer.app import ExportDialog, MainWindow, main
@@ -51,6 +52,32 @@ def test_empty_state_hides_once_an_image_is_open(window: MainWindow, frames: Pat
     window.open_path(frames)
 
     assert not window.empty_state.isVisible()
+    assert window.dial.isVisible()
+    assert window.dial.count == 3
+
+
+def test_dial_is_hidden_with_no_folder(window: MainWindow) -> None:
+    assert not window.dial.isVisible()
+
+
+def test_scrolling_the_dial_steps_to_the_next_image(window: MainWindow, frames: Path) -> None:
+    window.open_path(frames)
+    local = QPointF(window.dial.width() / 2, window.dial.height() / 2)
+    event = QWheelEvent(
+        local,
+        QPointF(window.dial.mapToGlobal(local.toPoint())),
+        QPoint(0, 0),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+
+    QApplication.sendEvent(window.dial, event)
+
+    assert window.canvas.image.path.name == "frame_2.png"
+    assert window.dial.index == 1
 
 
 def test_arrow_navigation_keeps_zoom_and_position(window: MainWindow, frames: Path) -> None:
@@ -112,7 +139,7 @@ def test_unsupported_file_stays_on_the_launch_screen(window: MainWindow, tmp_pat
 
     error = window.findChild(QLabel, "empty_error")
     assert error is not None and error.isVisible()
-    assert "Unsupported image type" in error.text()
+    assert "Unsupported file type" in error.text()
     assert window.findChild(QMessageBox) is None
     assert window.findChild(QPushButton, "open_image_button").isEnabled()
 
@@ -122,7 +149,7 @@ def test_empty_folder_leaves_the_window_clickable(window: MainWindow, tmp_path: 
 
     error = window.findChild(QLabel, "empty_error")
     assert error is not None and error.isVisible()
-    assert "No supported images" in error.text()
+    assert "No supported images or videos" in error.text()
     window.findChild(QPushButton, "open_image_button").click()
 
     dialog = window.findChild(QFileDialog)
@@ -275,6 +302,87 @@ def test_shortcuts_include_export(window: MainWindow, mocker) -> None:
     window.show_shortcuts()
 
     assert "Export a GIF or video" in captured["text"]
+
+
+def _write_gif(path: Path) -> None:
+    """A three-frame GIF of red, green, then blue."""
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    frames = [Image.new("RGB", (40, 30), color) for color in colors]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=[400, 400, 400], loop=0, disposal=2)
+
+
+def test_gif_pauses_keeps_zoom_and_shows_a_timeline(window: MainWindow, tmp_path: Path, qtbot) -> None:
+    _write_gif(tmp_path / "clip.gif")
+    still = np.zeros((30, 40, 3), dtype=np.uint8)
+    still[:, :, 2] = np.arange(40, dtype=np.uint8)
+    cv2.imwrite(str(tmp_path / "still.png"), still)
+
+    window.open_path(tmp_path / "still.png")
+
+    assert not window.clip_bar.isVisible()
+    assert window.export_action.isEnabled()
+
+    window.previous_action.trigger()
+
+    assert window.canvas.image.path.name == "clip.gif"
+    assert window.clip_bar.isVisible()
+    assert window.clip_bar.play_button.text() == "Pause"
+    assert window.mode_label.text() == "GIF · Original"
+    assert window.clip_bar.elapsed_label.text() == "0:00.0"
+    assert window.clip_bar.duration_label.text() == "0:01.2"
+    assert window.clip_bar.frame_label.text() == "1 / 3"
+
+    window.space_action.trigger()
+
+    assert window.clip_bar.play_button.text() == "Play"
+    assert not window._clip_timer.isActive()
+
+    window.canvas.zoom_by_steps(6)
+    zoom = window.canvas.zoom
+    assert zoom > 1
+    qtbot.waitUntil(lambda: window._clip is not None and window._clip.has_frame(1))
+    window._advance_clip()
+
+    assert window.canvas.zoom == zoom
+    assert window.canvas.image.values.shape == (30, 40, 3)
+    assert window.clip_bar.frame_label.text() == "2 / 3"
+
+    window.clip_bar.slider.setValue(2)
+
+    def sought_blue_frame() -> bool:
+        return (
+            window._clip is not None
+            and window._clip.index == 2
+            and not window._clip_timer.isActive()
+            and int(window.canvas.image.values[0, 0, 0]) == 255
+            and window.clip_bar.elapsed_label.text() == "0:00.8"
+        )
+
+    qtbot.waitUntil(sought_blue_frame)
+
+    window.next_action.trigger()
+
+    assert not window.clip_bar.isVisible()
+    assert window.canvas.image.path.name == "still.png"
+    assert window.mode_label.text() == "Original"
+
+
+def test_export_stays_disabled_for_a_folder_of_only_clips(window: MainWindow, tmp_path: Path) -> None:
+    _write_gif(tmp_path / "clip.gif")
+
+    window.open_path(tmp_path)
+
+    assert window.clip_bar.isVisible()
+    assert not window.export_action.isEnabled()
+
+
+def test_space_still_plays_through_still_images(window: MainWindow, frames: Path) -> None:
+    window.open_path(frames)
+
+    window.space_action.trigger()
+
+    assert window.play_action.isChecked()
+    assert window.play_timer.isActive()
 
 
 def test_wasd_reaches_canvas_through_window(window: MainWindow, frames: Path, qtbot) -> None:
