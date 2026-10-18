@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QCursor,
     QDragEnterEvent,
     QDropEvent,
+    QFileOpenEvent,
     QFont,
     QFontDatabase,
     QGuiApplication,
@@ -58,6 +59,7 @@ from pixel_viewer.export import (
     export_video,
 )
 from pixel_viewer.images import IMAGE_SUFFIXES, ImageFolder
+from pixel_viewer.install_desktop import install_launcher
 from pixel_viewer.theme import apply_theme, window_icon
 
 # ================================== Constants ================================ #
@@ -887,6 +889,21 @@ class MainWindow(QMainWindow):
 
 
 # ================================ Entry Point ================================ #
+class PixelViewerApplication(QApplication):
+    """QApplication that accepts images opened from Finder or the file manager while the app is running."""
+
+    def __init__(self, argv: list[str]) -> None:
+        super().__init__(argv)
+        self.open_file: Callable[[Path], object] | None = None
+
+    def event(self, event: QEvent) -> bool:
+        """Opens a file delivered by the operating system, such as Open With on macOS."""
+        if event.type() == QEvent.Type.FileOpen and isinstance(event, QFileOpenEvent) and self.open_file is not None:
+            self.open_file(Path(event.file()))
+            return True
+        return super().event(event)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Runs the viewer.
 
@@ -900,25 +917,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="pixel-viewer",
         description="Zoomable image viewer that shows per-pixel values. Use ← → to step through the folder.",
     )
-    parser.add_argument("path", nargs="?", type=Path, help="image file or folder to open")
+    parser.add_argument("path", nargs="*", type=Path, help="image file or folder to open")
     parser.add_argument("--gray", action="store_true", help="start in the grayscale view")
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="install a clickable app in ~/Applications (macOS) or the application menu (Linux)",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('pixel-viewer')}")
     args = parser.parse_args(argv)
-    if args.path is not None and not args.path.expanduser().exists():
-        parser.error(f"no such file or folder: {args.path}")
+    if args.install:
+        try:
+            installed = install_launcher()
+        except OSError as error:
+            print(f"Could not install {APP_NAME}: {error}", file=sys.stderr)
+            return 1
+        print(f"Installed {installed}")
+        return 0
 
-    app = QApplication(sys.argv[:1])
+    paths = [path.expanduser() for path in args.path]
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        parser.error(f"no such file or folder: {missing[0]}")
+
+    app = PixelViewerApplication(sys.argv[:1])
     app.setApplicationName("pixel-viewer")
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationDomain("com.mustachemo")
     app.setDesktopFileName("pixel-viewer")
     apply_theme(app)
     window = MainWindow(gray=args.gray)
+    app.open_file = window.open_path
     window.show()
     window.raise_()
     window.activateWindow()
-    if args.path is not None:
-        window.open_path(args.path)
+    if paths:
+        window.open_path(paths[0])
     return app.exec()
 
 

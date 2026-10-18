@@ -106,6 +106,21 @@ uv tool upgrade pixel-viewer
 uv tool uninstall pixel-viewer
 ```
 
+### Desktop app
+
+`pixel-viewer --install` adds a launcher you can click. It does not open a terminal.
+
+- **macOS.** Creates `~/Applications/Pixel Viewer.app`. Open it from Finder, Spotlight, or Launchpad, or drop an
+  image on the icon. It also appears in Open With. Run the command again after you move or reinstall Pixel Viewer;
+  the app points at the copy that was active when you installed it.
+- **Linux.** Adds **Pixel Viewer** to the application menu (`~/.local/share/applications`) and an icon. It does not
+  take over the default image viewer.
+
+```bash
+pixel-viewer --install          # after uv tool install, or any install that puts pixel-viewer on PATH
+uv run pixel-viewer --install   # from a git checkout, so the app follows this working tree
+```
+
 > [!NOTE]
 > **Linux:** Qt needs the XCB cursor library. If the app fails to start with a `qt.qpa.plugin` error, install
 > `libxcb-cursor0` (Debian/Ubuntu) or `xcb-util-cursor` (Fedora/Arch).
@@ -116,7 +131,7 @@ uv tool uninstall pixel-viewer
 pixel-viewer path/to/image.png          # open an image; ← / → browse its folder
 pixel-viewer path/to/folder             # open the first image in a folder
 pixel-viewer --gray path/to/image.png   # start in grayscale
-pixel-viewer                            # pick a file in a dialog
+pixel-viewer                            # open the window; drop a file or press Open
 ```
 
 You can also drag an image or folder onto the window.
@@ -171,6 +186,7 @@ color, so part 7 is the same color in every frame, and each cell shows the raw I
   glyphs.
 - **`export.py`** writes that same order to a looping GIF or an MP4, at a frame rate you choose.
 - **`app.py`** holds the window, native menus with shortcuts, dialogs and the command-line entry point.
+- **`install_desktop.py`** writes the macOS `.app` and the Linux `.desktop` entry for `pixel-viewer --install`.
 
 ## Development
 
@@ -179,6 +195,7 @@ git clone https://github.com/mustachemo/pixel-viewer
 cd pixel-viewer
 uv sync                                  # create .venv with runtime and dev dependencies
 uv run pixel-viewer path/to/image.png    # run from source
+uv run pixel-viewer --install            # clickable app for this checkout
 uv run pytest --cov=pixel_viewer         # tests (rendered off-screen, no display needed)
 uvx ruff check src tests && uvx ruff format src tests
 ```

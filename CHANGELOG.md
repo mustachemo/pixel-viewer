@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Export the open folder, or a frame range, as a looping GIF and/or an MP4 at a chosen frame rate
   (File → Export Animation, Ctrl+E).
+- `pixel-viewer --install` adds a clickable macOS app in `~/Applications` or a Linux application-menu
+  entry. The macOS app accepts images dropped on its icon or opened with Open With.
 
 ### Changed
 
