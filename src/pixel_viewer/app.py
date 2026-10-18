@@ -7,11 +7,11 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable, Sequence
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 # Third-party
-from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QSlider,
     QSpinBox,
     QStyle,
     QVBoxLayout,
@@ -66,6 +67,10 @@ from pixel_viewer.theme import apply_theme, window_icon
 APP_NAME = "Pixel Viewer"
 WINDOW_SIZE = (1400, 1000)
 STATUS_MESSAGE_MS = 6000
+PLAYBACK_MIN_MS = 100
+PLAYBACK_MAX_MS = 5000
+PLAYBACK_DEFAULT_MS = 1000
+PLAYBACK_STEP_MS = 100
 IMAGE_FILTER = f"Images ({' '.join(f'*{suffix}' for suffix in sorted(IMAGE_SUFFIXES))})"
 ANIMATION_FILTER = "GIF (*.gif);;MP4 video (*.mp4)"
 
@@ -370,6 +375,12 @@ class EmptyState(QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
 
+        self.error_label = QLabel()
+        self.error_label.setObjectName("empty_error")
+        self.error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+
         open_button = QPushButton("Open image")
         open_button.setObjectName("open_image_button")
         open_button.setDefault(True)
@@ -394,6 +405,7 @@ class EmptyState(QWidget):
         column.addWidget(mark)
         column.addWidget(title)
         column.addWidget(subtitle)
+        column.addWidget(self.error_label)
         column.addSpacing(8)
         column.addWidget(buttons)
         column.addStretch(1)
@@ -407,6 +419,15 @@ class EmptyState(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(column)
         self._fill()
+
+    def show_message(self, message: str | None) -> None:
+        """Shows an open error on the launch screen, or clears it when ``message`` is None."""
+        if message:
+            self.error_label.setText(message)
+            self.error_label.show()
+            return
+        self.error_label.clear()
+        self.error_label.hide()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         """Resizes with the canvas. Other events are left to the canvas."""
@@ -494,6 +515,10 @@ class MainWindow(QMainWindow):
         self.previous_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         self.next_action = self._action("&Next Image", ["Right"], lambda: self._go_by(1))
         self.next_action.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
+        self.play_action = self._action("&Play", ["Space"], self._toggle_play, checkable=True)
+        self.play_action.setEnabled(False)
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self._play_next)
         self.first_action = self._action("&First Image", ["Home"], lambda: self._go_to(0))
         self.last_action = self._action("&Last Image", ["End"], lambda: self._go_to(sys.maxsize))
         self.shortcuts_action = self._action("&Keyboard Shortcuts", ["H", "?"], self.show_shortcuts)
@@ -511,7 +536,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addActions([self.zoom_in_action, self.zoom_out_action, self.fit_action, self.find_action])
         go_menu = menu_bar.addMenu("&Go")
-        go_menu.addActions([self.previous_action, self.next_action])
+        go_menu.addActions([self.previous_action, self.next_action, self.play_action])
         go_menu.addSeparator()
         go_menu.addActions([self.first_action, self.last_action])
         help_menu = menu_bar.addMenu("&Help")
@@ -519,6 +544,7 @@ class MainWindow(QMainWindow):
 
         self.previous_action.setIconText("Previous")
         self.next_action.setIconText("Next")
+        self.play_action.setIconText("Play")
         self.gray_action.setIconText("Gray")
         self.zoom_in_action.setIconText("+")
         self.zoom_out_action.setIconText("−")
@@ -532,7 +558,8 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.addAction(self.open_action)
         toolbar.addSeparator()
-        toolbar.addActions([self.previous_action, self.next_action])
+        toolbar.addActions([self.previous_action, self.next_action, self.play_action])
+        toolbar.addWidget(self._playback_controls())
         toolbar.addSeparator()
         toolbar.addActions([self.original_action, self.gray_action])
         toolbar.addSeparator()
@@ -586,12 +613,14 @@ class MainWindow(QMainWindow):
             path: Image file or folder.
 
         Returns:
-            True if the path was opened; False after warning the user.
+            True if the path was opened; False after explaining the error on the window.
         """
         try:
             folder = ImageFolder(path)
         except (FileNotFoundError, ValueError, PermissionError) as error:
-            QMessageBox.warning(self, f"Cannot Open {path.name or path}", str(error))
+            # ! A modal QMessageBox here uses a nested event loop. Launched from a terminal, macOS then delivers
+            # ! clicks to neither the dialog nor the window, so the error stays on the launch screen instead.
+            self._report_open_error(str(error))
             return False
         if self._folder is not None:
             self._folder.close()
@@ -635,6 +664,67 @@ class MainWindow(QMainWindow):
         if self._folder is not None:
             self._go_to(self._folder.index + offset)
 
+    def _report_open_error(self, message: str) -> None:
+        """Explains a failed open without a modal dialog, so the Open buttons stay clickable."""
+        self.empty_state.show_message(message)
+        self.statusBar().showMessage(message, STATUS_MESSAGE_MS)
+
+    def _playback_controls(self) -> QWidget:
+        """Slider for how long each image stays on screen while Play is running."""
+        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.speed_slider.setObjectName("playback_speed")
+        self.speed_slider.setRange(PLAYBACK_MIN_MS, PLAYBACK_MAX_MS)
+        self.speed_slider.setSingleStep(PLAYBACK_STEP_MS)
+        self.speed_slider.setPageStep(PLAYBACK_STEP_MS * 5)
+        self.speed_slider.setValue(PLAYBACK_DEFAULT_MS)
+        self.speed_slider.setFixedWidth(140)
+        self.speed_slider.setAccessibleName("Time between images")
+        self.speed_slider.valueChanged.connect(self._set_playback_interval)
+        self.speed_label = QLabel(self._format_interval(PLAYBACK_DEFAULT_MS))
+        self.speed_label.setObjectName("playback_interval")
+        self.speed_label.setMinimumWidth(self.speed_label.fontMetrics().horizontalAdvance("5.0 s") + 8)
+
+        controls = QWidget()
+        layout = QHBoxLayout(controls)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.speed_slider)
+        layout.addWidget(self.speed_label)
+        return controls
+
+    def _toggle_play(self, playing: bool) -> None:
+        """Starts or stops automatic advance. ``playing`` is the action's new checked state."""
+        self.play_action.setIconText("Pause" if playing else "Play")
+        self.play_action.setText("&Pause" if playing else "&Play")
+        if playing:
+            self.play_timer.start(self.speed_slider.value())
+        else:
+            self.play_timer.stop()
+
+    def _play_next(self) -> None:
+        """Shows the next image, returning to the first after the last."""
+        if self._folder is None or len(self._folder.paths) < 2:
+            self.play_action.setChecked(False)
+            return
+        next_index = self._folder.index + 1
+        if next_index >= len(self._folder.paths):
+            next_index = 0
+        self._go_to(next_index)
+
+    def _set_playback_interval(self, milliseconds: int) -> None:
+        """Snaps the slider to a tenth of a second and applies it to a running slideshow."""
+        snapped = max(PLAYBACK_MIN_MS, min(PLAYBACK_MAX_MS, round(milliseconds / PLAYBACK_STEP_MS) * PLAYBACK_STEP_MS))
+        if snapped != milliseconds:
+            self.speed_slider.setValue(snapped)
+            return
+        self.speed_label.setText(self._format_interval(snapped))
+        self.play_timer.setInterval(snapped)
+
+    @staticmethod
+    def _format_interval(milliseconds: int) -> str:
+        """Formats a delay as seconds with one decimal, for example ``1.0 s``."""
+        return f"{milliseconds / 1000:.1f} s"
+
     def _show_current(self, keep_view: bool) -> None:
         """Loads the folder's selected image into the canvas and refreshes the window chrome."""
         assert self._folder is not None
@@ -643,6 +733,8 @@ class MainWindow(QMainWindow):
             self.canvas.set_image(self._folder.current(), keep_view=keep_view)
         except ValueError as error:
             self.statusBar().showMessage(str(error), STATUS_MESSAGE_MS)
+        else:
+            self.empty_state.show_message(None)
         # * Qt adds the app name itself (and on macOS a proxy icon for the file), so the title is just the file.
         self.setWindowFilePath(str(path))
         self.setWindowTitle(path.name)
@@ -656,6 +748,9 @@ class MainWindow(QMainWindow):
         ):
             action.setEnabled(enabled)
         self.export_action.setEnabled(not self._exporting)
+        self.play_action.setEnabled(count >= 2)
+        if count < 2 and self.play_action.isChecked():
+            self.play_action.setChecked(False)
         self.empty_state.setVisible(self.canvas.image is None)
         self._update_status()
 
@@ -678,6 +773,7 @@ class MainWindow(QMainWindow):
         quit_keys = self.quit_action.shortcuts()[0].toString(QKeySequence.SequenceFormat.NativeText)
         rows = [
             ("← →", "Previous / next image in the folder"),
+            ("Space", "Play or pause through the folder"),
             ("Home End", "First / last image"),
             ("Drag, W A S D", "Pan"),
             ("Scroll, pinch, + −", "Zoom at the pointer"),
@@ -876,6 +972,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Stops background decoding and any export before the window closes."""
+        self.play_timer.stop()
         self._save_geometry()
         if self._export_cancel is not None:
             self._export_cancel.set()
@@ -889,6 +986,14 @@ class MainWindow(QMainWindow):
 
 
 # ================================ Entry Point ================================ #
+def _package_version() -> str:
+    """Installed package version. A frozen app without metadata still launches."""
+    try:
+        return version("pixel-viewer")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
 class PixelViewerApplication(QApplication):
     """QApplication that accepts images opened from Finder or the file manager while the app is running."""
 
@@ -924,7 +1029,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="install a clickable app in ~/Applications (macOS) or the application menu (Linux)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {version('pixel-viewer')}")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     args = parser.parse_args(argv)
     if args.install:
         try:

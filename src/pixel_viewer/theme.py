@@ -37,6 +37,27 @@ QLabel#empty_subtitle, QLabel#hint {
 QLabel#empty_subtitle {
     font-size: 14px;
 }
+QLabel#empty_error {
+    color: #ffb0a4;
+    font-size: 14px;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #343b4c;
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: #e6b325;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    width: 14px;
+    height: 14px;
+    margin: -6px 0;
+    background: #f2f4f8;
+    border: 2px solid #e6b325;
+    border-radius: 7px;
+}
 QMenuBar {
     background: #12141a;
     color: #f2f4f8;

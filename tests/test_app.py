@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QPushButton, QToolBar
+from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox, QPushButton, QToolBar
 
 # Local
 from pixel_viewer.app import ExportDialog, MainWindow, main
@@ -104,15 +104,46 @@ def test_open_dialog_is_non_blocking_and_opens_selection(window: MainWindow, fra
 
 
 # ==================================== Errors ================================= #
-def test_unsupported_file_warns(window: MainWindow, tmp_path: Path, mocker) -> None:
-    warning = mocker.patch.object(QMessageBox, "warning")
+def test_unsupported_file_stays_on_the_launch_screen(window: MainWindow, tmp_path: Path) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("x")
 
     assert not window.open_path(notes)
 
-    warning.assert_called_once()
-    assert "Unsupported image type" in warning.call_args.args[2]
+    error = window.findChild(QLabel, "empty_error")
+    assert error is not None and error.isVisible()
+    assert "Unsupported image type" in error.text()
+    assert window.findChild(QMessageBox) is None
+    assert window.findChild(QPushButton, "open_image_button").isEnabled()
+
+
+def test_empty_folder_leaves_the_window_clickable(window: MainWindow, tmp_path: Path) -> None:
+    assert not window.open_path(tmp_path)
+
+    error = window.findChild(QLabel, "empty_error")
+    assert error is not None and error.isVisible()
+    assert "No supported images" in error.text()
+    window.findChild(QPushButton, "open_image_button").click()
+
+    dialog = window.findChild(QFileDialog)
+    assert dialog is not None and dialog.isVisible()
+
+
+def test_playback_advances_and_loops(window: MainWindow, frames: Path, qtbot) -> None:
+    window.open_path(frames)
+    window.speed_slider.setValue(100)
+    assert window.speed_label.text() == "0.1 s"
+    assert not window.play_action.isChecked()
+
+    window.play_action.trigger()
+    qtbot.waitUntil(lambda: window.canvas.image.path.name == "frame_2.png", timeout=2000)
+    window._go_to(len(window._folder.paths) - 1)
+    qtbot.waitUntil(lambda: window.canvas.image.path.name == "frame_1.png", timeout=2000)
+
+    window.play_action.trigger()
+
+    assert not window.play_timer.isActive()
+    assert window.play_action.iconText() == "Play"
 
 
 def test_undecodable_frame_reports_in_status_bar(window: MainWindow, frames: Path) -> None:
