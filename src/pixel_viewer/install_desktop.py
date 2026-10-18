@@ -40,13 +40,28 @@ _IMAGE_TYPES = ("public.png", "public.jpeg", "public.tiff", "com.microsoft.bmp")
 def launcher_command() -> list[str]:
     """Returns the command the desktop launcher should run.
 
-    Prefers the ``pixel-viewer`` script beside the current interpreter, which is where ``uv`` and pip install it.
+    Prefers the ``pixel-viewer`` script beside the interpreter that is running this command. That stays inside the
+    virtual environment: resolving a symlink here would land on the base Python, which does not have the package.
     Falls back to ``python -m pixel_viewer`` when that script is not there.
     """
-    script = Path(sys.executable).resolve().parent / "pixel-viewer"
-    if script.is_file() and os.access(script, os.X_OK):
-        return [str(script)]
-    return [str(Path(sys.executable).resolve()), "-m", "pixel_viewer"]
+    sibling = Path(sys.executable).parent / "pixel-viewer"
+    if _is_launcher(sibling):
+        return [str(sibling)]
+    if sys.argv and sys.argv[0]:
+        invoked = Path(sys.argv[0])
+        if not invoked.is_absolute():
+            invoked = Path.cwd() / invoked
+        if _is_launcher(invoked):
+            return [str(invoked)]
+    found = shutil.which("pixel-viewer")
+    if found is not None and _is_launcher(Path(found)):
+        return [str(Path(found).resolve())]
+    return [sys.executable, "-m", "pixel_viewer"]
+
+
+def _is_launcher(path: Path) -> bool:
+    """True for an executable console script. Skips ``.py`` files, which are not standalone programs."""
+    return path.is_file() and os.access(path, os.X_OK) and path.suffix != ".py"
 
 
 def install_launcher(root: Path | None = None) -> Path:

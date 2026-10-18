@@ -4,6 +4,7 @@
 import plistlib
 import shutil
 import stat
+import sys
 from pathlib import Path
 
 # Third-party
@@ -11,7 +12,21 @@ import pytest
 
 # Local
 from pixel_viewer.app import main
-from pixel_viewer.install_desktop import install_linux, install_macos
+from pixel_viewer.install_desktop import install_linux, install_macos, launcher_command
+
+
+def test_launcher_uses_the_script_beside_the_interpreter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    script = bin_dir / "pixel-viewer"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(python))
+
+    assert launcher_command() == [str(script)]
 
 
 def test_macos_bundle_is_a_clickable_app(tmp_path: Path) -> None:
