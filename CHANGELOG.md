@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format follows
 - Export the open folder, or a frame range, as a looping GIF and/or an MP4 at a chosen frame rate
   (File → Export Animation, Ctrl+E).
 
+### Changed
+
+- Dark window chrome, a launch screen with Open buttons, and an application icon. Launching with no
+  path shows that screen instead of a file dialog.
+
 ## [0.1.0] - 2026-09-24
 
 ### Added

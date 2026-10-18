@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QToolBar
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QPushButton, QToolBar
 
 # Local
 from pixel_viewer.app import ExportDialog, MainWindow, main
@@ -37,6 +37,22 @@ def window(qtbot) -> MainWindow:
 
 
 # =================================== Browsing ================================ #
+def test_empty_state_opens_the_file_dialog(window: MainWindow) -> None:
+    button = window.findChild(QPushButton, "open_image_button")
+
+    assert button is not None and button.isVisible()
+    button.click()
+
+    dialog = window.findChild(QFileDialog)
+    assert dialog is not None and dialog.isVisible()
+
+
+def test_empty_state_hides_once_an_image_is_open(window: MainWindow, frames: Path) -> None:
+    window.open_path(frames)
+
+    assert not window.empty_state.isVisible()
+
+
 def test_arrow_navigation_keeps_zoom_and_position(window: MainWindow, frames: Path) -> None:
     assert window.open_path(frames / "frame_1.png")
     window.canvas.zoom_by_steps(3, QPointF(50, 50))

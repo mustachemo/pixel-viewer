@@ -11,7 +11,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 # Third-party
-from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -19,7 +19,9 @@ from PySide6.QtGui import (
     QCursor,
     QDragEnterEvent,
     QDropEvent,
+    QFont,
     QFontDatabase,
+    QGuiApplication,
     QKeySequence,
 )
 from PySide6.QtWidgets import (
@@ -56,6 +58,7 @@ from pixel_viewer.export import (
     export_video,
 )
 from pixel_viewer.images import IMAGE_SUFFIXES, ImageFolder
+from pixel_viewer.theme import apply_theme, window_icon
 
 # ================================== Constants ================================ #
 APP_NAME = "Pixel Viewer"
@@ -153,7 +156,12 @@ class ExportDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        self.preview_label.setObjectName("hint")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(14)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(12)
         layout.addLayout(form)
         layout.addWidget(self.preview_label)
         layout.addWidget(buttons)
@@ -315,6 +323,115 @@ class _AnimationExporter(QObject):
         self.succeeded.emit(message)
 
 
+def _dropped_paths(event: QDropEvent | QDragEnterEvent) -> list[Path]:
+    """Local files carried by a drag, ignoring anything that is not a file URL."""
+    return [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+
+
+# =============================== Empty state ================================= #
+class EmptyState(QWidget):
+    """Centered launch screen shown until an image is open."""
+
+    def __init__(
+        self,
+        canvas: QWidget,
+        on_open: Callable[[], object],
+        on_open_folder: Callable[[], object],
+        on_drop: Callable[[Path], object],
+    ) -> None:
+        """Builds the empty state as a child of ``canvas`` and keeps it filling that canvas.
+
+        Args:
+            canvas: Widget the empty state covers.
+            on_open: Opens the image file dialog.
+            on_open_folder: Opens the folder dialog.
+            on_drop: Opens a path dropped onto the empty state.
+        """
+        super().__init__(canvas)
+        self._on_drop = on_drop
+        self.setObjectName("empty_state")
+        self.setAcceptDrops(True)
+        # * A plain QWidget ignores stylesheet backgrounds unless this is set, which let the canvas hint show through.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        canvas.installEventFilter(self)
+
+        mark = QLabel()
+        mark.setPixmap(window_icon().pixmap(72, 72))
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel("Pixel Viewer")
+        title.setObjectName("empty_title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        subtitle = QLabel("Drop an image or a folder to inspect every pixel.")
+        subtitle.setObjectName("empty_subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+
+        open_button = QPushButton("Open image")
+        open_button.setObjectName("open_image_button")
+        open_button.setDefault(True)
+        open_button.clicked.connect(on_open)
+        folder_button = QPushButton("Open folder")
+        folder_button.setObjectName("open_folder_button")
+        folder_button.clicked.connect(on_open_folder)
+
+        buttons = QWidget()
+        button_row = QHBoxLayout(buttons)
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+        button_row.addWidget(open_button)
+        button_row.addWidget(folder_button)
+        button_row.addStretch(1)
+
+        column = QVBoxLayout()
+        column.setSpacing(10)
+        column.setContentsMargins(32, 32, 32, 32)
+        column.addStretch(1)
+        column.addWidget(mark)
+        column.addWidget(title)
+        column.addWidget(subtitle)
+        column.addSpacing(8)
+        column.addWidget(buttons)
+        column.addStretch(1)
+
+        title_font = QFont(title.font())
+        title_font.setPointSize(22)
+        title_font.setWeight(QFont.Weight.DemiBold)
+        title.setFont(title_font)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(column)
+        self._fill()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Resizes with the canvas. Other events are left to the canvas."""
+        if watched is self.parent() and event.type() == QEvent.Type.Resize:
+            self._fill()
+        return super().eventFilter(watched, event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accepts dragged local files and folders."""
+        if _dropped_paths(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Opens the first dropped file or folder."""
+        paths = _dropped_paths(event)
+        if paths:
+            event.acceptProposedAction()
+            self._on_drop(paths[0])
+
+    def _fill(self) -> None:
+        """Covers the whole canvas."""
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+            self.raise_()
+
+
 # ================================ Main Window ================================ #
 class MainWindow(QMainWindow):
     """Viewer window: the pixel canvas plus native menus, a toolbar and a status bar."""
@@ -326,6 +443,10 @@ class MainWindow(QMainWindow):
             gray: Start in the grayscale view.
         """
         super().__init__()
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            apply_theme(app)
+        self.setWindowIcon(window_icon())
         self._folder: ImageFolder | None = None
         self._export_thread: QThread | None = None
         self._export_worker: _AnimationExporter | None = None
@@ -335,6 +456,7 @@ class MainWindow(QMainWindow):
         self._closing_progress = False
         self.canvas = PixelCanvas(self)
         self.canvas.set_gray(gray)
+        self.empty_state = EmptyState(self.canvas, self.open_file_dialog, self.open_folder_dialog, self.open_path)
         self.setCentralWidget(self.canvas)
         self.setAcceptDrops(True)
         self.setUnifiedTitleAndToolBarOnMac(True)
@@ -393,6 +515,15 @@ class MainWindow(QMainWindow):
         help_menu = menu_bar.addMenu("&Help")
         help_menu.addAction(self.shortcuts_action)
 
+        self.previous_action.setIconText("Previous")
+        self.next_action.setIconText("Next")
+        self.gray_action.setIconText("Gray")
+        self.zoom_in_action.setIconText("+")
+        self.zoom_out_action.setIconText("−")
+        self.fit_action.setIconText("Fit")
+        self.find_action.setIconText("Find")
+        self.export_action.setIconText("Export")
+
         toolbar = self.addToolBar("Main")
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
@@ -426,6 +557,8 @@ class MainWindow(QMainWindow):
         self.canvas.view_changed.connect(self._update_status)
         self._show_cursor(None)
         self._update_status()
+        if not self._restore_geometry():
+            self.resize(*WINDOW_SIZE)
         self.canvas.setFocus()
 
     def _action(
@@ -521,6 +654,7 @@ class MainWindow(QMainWindow):
         ):
             action.setEnabled(enabled)
         self.export_action.setEnabled(not self._exporting)
+        self.empty_state.setVisible(self.canvas.image is None)
         self._update_status()
 
     # ------------------------------- View ------------------------------------ #
@@ -708,18 +842,39 @@ class MainWindow(QMainWindow):
     # ----------------------------- Window events ----------------------------- #
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accepts dragged local files and folders."""
-        if any(url.isLocalFile() for url in event.mimeData().urls()):
+        if _dropped_paths(event):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
         """Opens the first dropped file or folder."""
-        local_paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
-        if local_paths:
+        paths = _dropped_paths(event)
+        if paths:
             event.acceptProposedAction()
-            self.open_path(local_paths[0])
+            self.open_path(paths[0])
+
+    def _restore_geometry(self) -> bool:
+        """Restores the last window size when a display is attached.
+
+        Returns:
+            True if a saved size was applied. Off-screen tests skip this and keep the size the test sets.
+        """
+        if QGuiApplication.platformName() == "offscreen":
+            return False
+        geometry = QSettings("com.mustachemo.pixelviewer", "pixel-viewer").value("geometry")
+        if geometry is None:
+            return False
+        self.restoreGeometry(geometry)
+        return True
+
+    def _save_geometry(self) -> None:
+        """Remembers the window size for the next launch."""
+        if QGuiApplication.platformName() == "offscreen":
+            return
+        QSettings("com.mustachemo.pixelviewer", "pixel-viewer").setValue("geometry", self.saveGeometry())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Stops background decoding and any export before the window closes."""
+        self._save_geometry()
         if self._export_cancel is not None:
             self._export_cancel.set()
         thread = self._export_thread
@@ -745,7 +900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="pixel-viewer",
         description="Zoomable image viewer that shows per-pixel values. Use ← → to step through the folder.",
     )
-    parser.add_argument("path", nargs="?", type=Path, help="image file or folder to open (asks when omitted)")
+    parser.add_argument("path", nargs="?", type=Path, help="image file or folder to open")
     parser.add_argument("--gray", action="store_true", help="start in the grayscale view")
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('pixel-viewer')}")
     args = parser.parse_args(argv)
@@ -755,26 +910,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName("pixel-viewer")
     app.setApplicationDisplayName(APP_NAME)
+    app.setOrganizationDomain("com.mustachemo")
+    app.setDesktopFileName("pixel-viewer")
+    apply_theme(app)
     window = MainWindow(gray=args.gray)
-    window.resize(*WINDOW_SIZE)
     window.show()
     window.raise_()
     window.activateWindow()
     if args.path is not None:
         window.open_path(args.path)
-    else:
-        # ! macOS ignores clicks on a file panel shown before the app is frontmost, which is common when it is
-        # ! launched from a terminal, so wait for the app to become active before asking for a file.
-        dialog_requested = False
-
-        def open_dialog_when_active(state: Qt.ApplicationState) -> None:
-            nonlocal dialog_requested
-            if state == Qt.ApplicationState.ApplicationActive and not dialog_requested:
-                dialog_requested = True
-                window.open_file_dialog()
-
-        app.applicationStateChanged.connect(open_dialog_when_active)
-        QTimer.singleShot(0, lambda: open_dialog_when_active(app.applicationState()))
     return app.exec()
 
 

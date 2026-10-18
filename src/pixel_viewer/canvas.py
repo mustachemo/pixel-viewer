@@ -42,10 +42,10 @@ PINCH_PER_STEP = 0.12
 MIN_FONT_PIXELS = 6
 GLYPH_CACHE_LIMIT = 4096
 
-BACKGROUND_COLOR = QColor(30, 30, 30)
+BACKGROUND_COLOR = QColor(18, 20, 26)
 GRID_COLOR = QColor(70, 70, 70)
-HOVER_COLOR = QColor(255, 220, 0)
-PLACEHOLDER_COLOR = QColor(150, 150, 150)
+HOVER_COLOR = QColor(230, 179, 37)
+PLACEHOLDER_COLOR = QColor(154, 163, 181)
 OUTLINE_COLOR = QColor(0, 0, 0, 220)
 CHANNEL_TEXT_COLORS = (QColor(255, 70, 70), QColor(70, 230, 70), QColor(50, 160, 255))
 DARK_TEXT_COLOR = QColor(0, 0, 0)
@@ -302,8 +302,7 @@ class PixelCanvas(QWidget):
         dirty = event.rect()
         painter.fillRect(dirty, BACKGROUND_COLOR)
         if self._image is None:
-            painter.setPen(PLACEHOLDER_COLOR)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Open an image or drop one here")
+            self._paint_empty(painter)
             return
 
         zoom, origin = self.zoom, self._origin()
@@ -345,6 +344,38 @@ class PixelCanvas(QWidget):
             painter.setPen(hover_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._cell_rect(*self._hover).adjusted(1, 1, -1, -1))
+
+    def _paint_empty(self, painter: QPainter) -> None:
+        """Draws a small pixel mark and a hint when no image is open.
+
+        The main window covers this with its own empty state. The hint stays so a bare canvas still explains itself.
+        """
+        painter.setPen(PLACEHOLDER_COLOR)
+        center = self.rect().center()
+        cell = 14
+        gap = 5
+        origin_x = center.x() - (cell * 3 + gap * 2) / 2
+        origin_y = center.y() - 56
+        accents = {
+            (0, 1): QColor(230, 179, 37),
+            (1, 0): QColor(61, 214, 140),
+            (1, 2): QColor(92, 154, 255),
+            (2, 1): QColor(255, 107, 107),
+        }
+        for row in range(3):
+            for column in range(3):
+                painter.fillRect(
+                    int(origin_x + column * (cell + gap)),
+                    int(origin_y + row * (cell + gap)),
+                    cell,
+                    cell,
+                    accents.get((row, column), QColor(48, 56, 72)),
+                )
+        painter.drawText(
+            QRect(0, center.y() + 8, self.width(), 28),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+            "Drop an image or a folder",
+        )
 
     def _draw_values(self, painter: QPainter, zoom: float, origin: QPointF, bounds: tuple[int, int, int, int]) -> None:
         """Draws each visible pixel's value(s) centred in its cell.
