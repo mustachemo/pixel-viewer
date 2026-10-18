@@ -108,17 +108,27 @@ uv tool uninstall pixel-viewer
 
 ### Desktop app
 
-`pixel-viewer --install` adds a launcher you can click. It does not open a terminal.
+You do not need a terminal to open Pixel Viewer.
 
-- **macOS.** Creates `~/Applications/Pixel Viewer.app`. Open it from Finder, Spotlight, or Launchpad, or drop an
-  image on the icon. It also appears in Open With. Run the command again after you move or reinstall Pixel Viewer;
-  the app points at the copy that was active when you installed it.
-- **Linux.** Adds **Pixel Viewer** to the application menu (`~/.local/share/applications`) and an icon. It does not
-  take over the default image viewer.
+**macOS.** Drag `Pixel Viewer.app` into Applications, then open it from Finder, Spotlight, or Launchpad. Drop an
+image on the icon, or use Open With. A tagged GitHub release includes `PixelViewer-macOS.zip`. Unzip it and drag
+the app across. The first time someone opens a downloaded copy, macOS may say it cannot be verified: right-click
+the app, choose **Open**, then **Open** again. That is Gatekeeper. The app is not signed with an Apple Developer ID.
+
+Build the app from this checkout (it lands in `dist/macos/Pixel Viewer.app` and `dist/PixelViewer-macOS.zip`):
+
+```bash
+uv run --with pyinstaller python packaging/build_macos_app.py --install
+```
+
+`--install` also copies it to `~/Applications`, replacing the previous copy.
+
+**Linux.** `pixel-viewer --install` adds **Pixel Viewer** to the application menu. It does not take over the
+default image viewer.
 
 ```bash
 pixel-viewer --install          # after uv tool install, or any install that puts pixel-viewer on PATH
-uv run pixel-viewer --install   # from a git checkout, so the app follows this working tree
+uv run pixel-viewer --install   # from a git checkout, so the menu entry follows this working tree
 ```
 
 > [!NOTE]
@@ -141,6 +151,7 @@ You can also drag an image or folder onto the window.
 | Keys | Action |
 | --- | --- |
 | **←** / **→** | Previous / next image in the folder |
+| **Space** | Play or pause through the folder. The toolbar slider sets the time between images, from 0.1 s to 5 s |
 | **Home** / **End** | First / last image |
 | Drag, **W A S D** | Pan |
 | Scroll, pinch, **+** / **−** | Zoom around the pointer |

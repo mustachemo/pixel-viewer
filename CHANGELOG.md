@@ -12,11 +12,17 @@ All notable changes to this project are documented here. The format follows
   (File → Export Animation, Ctrl+E).
 - `pixel-viewer --install` adds a clickable macOS app in `~/Applications` or a Linux application-menu
   entry. The macOS app accepts images dropped on its icon or opened with Open With.
+- A standalone `Pixel Viewer.app` can be dragged into Applications. Tagged releases attach
+  `PixelViewer-macOS.zip`. Build it locally with `python packaging/build_macos_app.py`.
+- Play through the open folder with Space, or the Play button. A slider sets the delay between images
+  from 0.1 s to 5 s. Playback loops back to the first image.
 
 ### Changed
 
 - Dark window chrome, a launch screen with Open buttons, and an application icon. Launching with no
   path shows that screen instead of a file dialog.
+- Opening a folder with no supported images explains the problem on the launch screen. The window stays
+  clickable, including when Pixel Viewer is started from a terminal.
 
 ## [0.1.0] - 2026-09-24
 
