@@ -158,7 +158,7 @@ You can also drag an image or folder onto the window.
 | **Home** / **End** | First / last image |
 | Drag, **W A S D** | Pan |
 | Scroll, pinch, **+** / **−** | Zoom around the pointer |
-| Scroll or drag the dial on the right | Move through the folder. One wheel notch is one image; a drag across a long folder can reach any frame |
+| Scroll or drag the wheel on the right | Move through the folder, stills, GIFs and videos together. One notch is one file |
 | **G** | Toggle original / grayscale |
 | **C** | Find object: zoom to the non-background pixels |
 | **R** | Fit to window |
@@ -200,7 +200,7 @@ color, so part 7 is the same color in every frame, and each cell shows the raw I
   scaling so pixels stay square, snaps to whole zoom levels so the grid stays crisp, and caches rendered number
   glyphs.
 - **`export.py`** writes that same order to a looping GIF or an MP4, at a frame rate you choose.
-- **`dial.py`** is the thumbwheel that scrubs through the open folder.
+- **`dial.py`** is the scroll wheel that rolls through every file in the open folder.
 - **`media.py`** plays one GIF or video, one frame at a time, as a normal image.
 - **`app.py`** holds the window, native menus with shortcuts, dialogs and the command-line entry point.
 - **`install_desktop.py`** writes the macOS `.app` and the Linux `.desktop` entry for `pixel-viewer --install`.

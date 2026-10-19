@@ -78,6 +78,37 @@ def test_scrolling_the_dial_steps_to_the_next_image(window: MainWindow, frames: 
 
     assert window.canvas.image.path.name == "frame_2.png"
     assert window.dial.index == 1
+    assert window.dial.label == "frame_2.png"
+
+
+def test_dial_rolls_from_a_still_image_to_a_gif(window: MainWindow, tmp_path: Path) -> None:
+    _write_gif(tmp_path / "clip.gif")
+    still = np.zeros((30, 40, 3), dtype=np.uint8)
+    still[:, :, 1] = 180
+    cv2.imwrite(str(tmp_path / "still.png"), still)
+    window.open_path(tmp_path / "still.png")
+
+    assert window.dial.isVisible()
+    assert window.dial.count == 2
+    assert window.dial.label == "still.png"
+    assert not window.clip_bar.isVisible()
+
+    local = QPointF(window.dial.width() / 2, window.dial.height() / 2)
+    event = QWheelEvent(
+        local,
+        QPointF(window.dial.mapToGlobal(local.toPoint())),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(window.dial, event)
+
+    assert window.canvas.image.path.name == "clip.gif"
+    assert window.dial.label == "clip.gif"
+    assert window.clip_bar.isVisible()
 
 
 def test_arrow_navigation_keeps_zoom_and_position(window: MainWindow, frames: Path) -> None:

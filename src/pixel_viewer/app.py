@@ -899,7 +899,7 @@ class MainWindow(QMainWindow):
         self.play_action.setEnabled(count >= 2)
         if count < 2 and self.play_action.isChecked():
             self.play_action.setChecked(False)
-        self.dial.set_position(index, count)
+        self.dial.set_position(index, count, path.name)
         self.dial.setVisible(count > 0)
         self.empty_state.setVisible(self.canvas.image is None)
         self._update_status()
@@ -927,7 +927,7 @@ class MainWindow(QMainWindow):
             ("Home End", "First / last image"),
             ("Drag, W A S D", "Pan"),
             ("Scroll, pinch, + −", "Zoom at the pointer"),
-            ("Scroll or drag the dial", "Move through the folder"),
+            ("Scroll or drag the wheel", "Move through images, GIFs and videos"),
             ("G", "Toggle original / grayscale"),
             ("C", "Find object"),
             ("R", "Fit to window"),
